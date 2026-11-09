@@ -1,18 +1,14 @@
 {
+  "name": "@microsoft/microsoft.msal.components.webassembly",
   "private": true,
   "scripts": {
-    "build": "npm run build:release",
-    "build:release": "webpack --mode production --env.production --env.configuration=Release",
-    "build:debug": "webpack --mode development --env.configuration=Debug",
-    "watch": "webpack --watch --mode development --env.configuration=Debug"
-  },
-  "devDependencies": {
-    "ts-loader": "^6.2.1",
-    "typescript": "^3.7.5",
-    "webpack": "^4.41.5",
-    "webpack-cli": "^3.3.10"
+    "clean": "rimraf ./dist/Debug ./dist/Release",
+    "prebuild": "npm run clean",
+    "build": "npm run build:debug && npm run build:production",
+    "build:debug": "rollup -c --environment development --forceExit",
+    "build:production": "rollup -c --environment production --forceExit"
   },
   "dependencies": {
-    "msal": "^1.2.1"
+    "@azure/msal-browser": "^4.30.0"
   }
 }

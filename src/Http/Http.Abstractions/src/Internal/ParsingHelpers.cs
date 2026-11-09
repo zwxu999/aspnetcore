@@ -1,164 +1,200 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
-using System.Linq;
+using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.Primitives;
 
-namespace Microsoft.AspNetCore.Http
+namespace Microsoft.AspNetCore.Http;
+
+internal static class ParsingHelpers
 {
-    internal static class ParsingHelpers
+    public static StringValues GetHeader(IHeaderDictionary headers, string key)
     {
-        public static StringValues GetHeader(IHeaderDictionary headers, string key)
+        StringValues value;
+        return headers.TryGetValue(key, out value) ? value : StringValues.Empty;
+    }
+
+    public static string[] GetHeaderSplit(IHeaderDictionary headers, string key)
+    {
+        var values = GetHeaderUnmodified(headers, key);
+
+        ValueListBuilder<string> strings = new([null!, null!, null!, null!]);
+
+        foreach (var segment in new HeaderSegmentCollection(values))
         {
-            StringValues value;
-            return headers.TryGetValue(key, out value) ? value : StringValues.Empty;
+            if (!StringSegment.IsNullOrEmpty(segment.Data))
+            {
+                var value = DeQuote(segment.Data.Value);
+                if (!string.IsNullOrEmpty(value))
+                {
+                    strings.Add(value);
+                }
+            }
         }
 
-        public static StringValues GetHeaderSplit(IHeaderDictionary headers, string key)
+        string[] result = strings.AsSpan().ToArray();
+        strings.Dispose();
+
+        return result;
+    }
+
+    public static StringValues GetHeaderUnmodified(IHeaderDictionary headers, string key)
+    {
+        ArgumentNullException.ThrowIfNull(headers);
+
+        StringValues values;
+        return headers.TryGetValue(key, out values) ? values : StringValues.Empty;
+    }
+
+    public static void SetHeaderJoined(IHeaderDictionary headers, string key, StringValues value)
+    {
+        ArgumentNullException.ThrowIfNull(headers);
+        ArgumentException.ThrowIfNullOrEmpty(key);
+
+        if (StringValues.IsNullOrEmpty(value))
         {
-            var values = GetHeaderUnmodified(headers, key);
+            headers.Remove(key);
+        }
+        else
+        {
+            headers[key] = JoinQuoted(prefix: null, value);
+        }
+    }
 
-            StringValues result = default;
+    // Joins the values with ',' (null values are treated as empty), quoting items that contain commas and are not already quoted.
+    // When prefix is not null, the result is prefix + "," + joined values.
+    private static string JoinQuoted(string? prefix, StringValues values)
+    {
+        var count = values.Count;
 
-            foreach (var segment in new HeaderSegmentCollection(values))
+        if (prefix is null && count == 1)
+        {
+            var single = values[0];
+            if (!NeedsQuotes(single))
             {
-                if (!StringSegment.IsNullOrEmpty(segment.Data))
+                return single ?? string.Empty;
+            }
+        }
+
+        var length = prefix is null ? count - 1 : prefix.Length + count;
+        for (var i = 0; i < count; i++)
+        {
+            var value = values[i];
+            if (value is not null)
+            {
+                length += NeedsQuotes(value) ? value.Length + 2 : value.Length;
+            }
+        }
+
+        return string.Create(length, (prefix, values), static (span, state) =>
+        {
+            var position = 0;
+            if (state.prefix is not null)
+            {
+                state.prefix.AsSpan().CopyTo(span);
+                position = state.prefix.Length;
+                span[position++] = ',';
+            }
+
+            var values = state.values;
+            for (var i = 0; i < values.Count; i++)
+            {
+                if (i > 0)
                 {
-                    var value = DeQuote(segment.Data.Value);
-                    if (!string.IsNullOrEmpty(value))
-                    {
-                        result = StringValues.Concat(in result, value);
-                    }
+                    span[position++] = ',';
+                }
+
+                var value = values[i];
+                if (value is null)
+                {
+                    continue;
+                }
+
+                if (NeedsQuotes(value))
+                {
+                    span[position++] = '"';
+                    value.AsSpan().CopyTo(span.Slice(position));
+                    position += value.Length;
+                    span[position++] = '"';
+                }
+                else
+                {
+                    value.AsSpan().CopyTo(span.Slice(position));
+                    position += value.Length;
                 }
             }
 
-            return result;
-        }
+            Debug.Assert(position == span.Length);
+        });
+    }
 
-        public static StringValues GetHeaderUnmodified(IHeaderDictionary headers, string key)
+    // Items that contain commas and are not already quoted need to be quoted.
+    private static bool NeedsQuotes([NotNullWhen(true)] string? value)
+    {
+        return !string.IsNullOrEmpty(value) &&
+            value.Contains(',') &&
+            (value[0] != '"' || value[value.Length - 1] != '"');
+    }
+
+    private static string? DeQuote(string? value)
+    {
+        if (!string.IsNullOrEmpty(value) &&
+            (value.Length > 1 && value[0] == '"' && value[value.Length - 1] == '"'))
         {
-            if (headers == null)
-            {
-                throw new ArgumentNullException(nameof(headers));
-            }
-
-            StringValues values;
-            return headers.TryGetValue(key, out values) ? values : StringValues.Empty;
+            value = value.Substring(1, value.Length - 2);
         }
 
-        public static void SetHeaderJoined(IHeaderDictionary headers, string key, StringValues value)
+        return value;
+    }
+
+    public static void SetHeaderUnmodified(IHeaderDictionary headers, string key, StringValues? values)
+    {
+        ArgumentNullException.ThrowIfNull(headers);
+        ArgumentException.ThrowIfNullOrEmpty(key);
+
+        if (!values.HasValue || StringValues.IsNullOrEmpty(values.GetValueOrDefault()))
         {
-            if (headers == null)
-            {
-                throw new ArgumentNullException(nameof(headers));
-            }
-
-            if (string.IsNullOrEmpty(key))
-            {
-                throw new ArgumentNullException(nameof(key));
-            }
-            if (StringValues.IsNullOrEmpty(value))
-            {
-                headers.Remove(key);
-            }
-            else
-            {
-                headers[key] = string.Join(",", value.Select((s) => QuoteIfNeeded(s)));
-            }
+            headers.Remove(key);
         }
-
-        // Quote items that contain commas and are not already quoted.
-        private static string QuoteIfNeeded(string value)
+        else
         {
-            if (!string.IsNullOrEmpty(value) &&
-                value.Contains(',') &&
-                (value[0] != '"' || value[value.Length - 1] != '"'))
-            {
-                return $"\"{value}\"";
-            }
-            return value;
+            headers[key] = values.GetValueOrDefault();
         }
+    }
 
-        private static string DeQuote(string value)
+    public static void AppendHeaderJoined(IHeaderDictionary headers, string key, params string[] values)
+    {
+        ArgumentNullException.ThrowIfNull(headers);
+        ArgumentNullException.ThrowIfNull(key);
+
+        if (values == null || values.Length == 0)
         {
-            if (!string.IsNullOrEmpty(value) &&
-                (value.Length > 1 && value[0] == '"' && value[value.Length - 1] == '"'))
-            {
-                value = value.Substring(1, value.Length - 2);
-            }
-
-            return value;
+            return;
         }
 
-        public static void SetHeaderUnmodified(IHeaderDictionary headers, string key, StringValues? values)
+        string? existing = GetHeader(headers, key);
+        if (existing == null)
         {
-            if (headers == null)
-            {
-                throw new ArgumentNullException(nameof(headers));
-            }
-
-            if (string.IsNullOrEmpty(key))
-            {
-                throw new ArgumentNullException(nameof(key));
-            }
-            if (!values.HasValue || StringValues.IsNullOrEmpty(values.GetValueOrDefault()))
-            {
-                headers.Remove(key);
-            }
-            else
-            {
-                headers[key] = values.GetValueOrDefault();
-            }
+            SetHeaderJoined(headers, key, values);
         }
-
-        public static void AppendHeaderJoined(IHeaderDictionary headers, string key, params string[] values)
+        else
         {
-            if (headers == null)
-            {
-                throw new ArgumentNullException(nameof(headers));
-            }
-
-            if (key == null)
-            {
-                throw new ArgumentNullException(nameof(key));
-            }
-
-            if (values == null || values.Length == 0)
-            {
-                return;
-            }
-
-            string existing = GetHeader(headers, key);
-            if (existing == null)
-            {
-                SetHeaderJoined(headers, key, values);
-            }
-            else
-            {
-                headers[key] = existing + "," + string.Join(",", values.Select(value => QuoteIfNeeded(value)));
-            }
+            headers[key] = JoinQuoted(existing, values);
         }
+    }
 
-        public static void AppendHeaderUnmodified(IHeaderDictionary headers, string key, StringValues values)
+    public static void AppendHeaderUnmodified(IHeaderDictionary headers, string key, StringValues values)
+    {
+        ArgumentNullException.ThrowIfNull(headers);
+        ArgumentNullException.ThrowIfNull(key);
+
+        if (values.Count == 0)
         {
-            if (headers == null)
-            {
-                throw new ArgumentNullException(nameof(headers));
-            }
-
-            if (key == null)
-            {
-                throw new ArgumentNullException(nameof(key));
-            }
-
-            if (values.Count == 0)
-            {
-                return;
-            }
-
-            var existing = GetHeaderUnmodified(headers, key);
-            SetHeaderUnmodified(headers, key, StringValues.Concat(existing, values));
+            return;
         }
+
+        var existing = GetHeaderUnmodified(headers, key);
+        SetHeaderUnmodified(headers, key, StringValues.Concat(existing, values));
     }
 }

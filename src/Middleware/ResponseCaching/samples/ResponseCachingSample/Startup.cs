@@ -1,54 +1,60 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
-using System.IO;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
+using Microsoft.AspNetCore.ResponseCaching;
 using Microsoft.Net.Http.Headers;
 
-namespace ResponseCachingSample
+namespace ResponseCachingSample;
+
+public class Startup
 {
-    public class Startup
+    public void ConfigureServices(IServiceCollection services)
     {
-        public void ConfigureServices(IServiceCollection services)
-        {
-            services.AddResponseCaching();
-        }
+        services.AddResponseCaching();
+    }
 
-        public void Configure(IApplicationBuilder app)
+    public void Configure(IApplicationBuilder app)
+    {
+        app.UseResponseCaching();
+        app.Run(async (context) =>
         {
-            app.UseResponseCaching();
-            app.Run(async (context) =>
+            context.Response.GetTypedHeaders().CacheControl = new CacheControlHeaderValue()
             {
-                context.Response.GetTypedHeaders().CacheControl = new CacheControlHeaderValue()
-                {
-                    Public = true,
-                    MaxAge = TimeSpan.FromSeconds(10)
-                };
-                context.Response.Headers[HeaderNames.Vary] = new string[] { "Accept-Encoding" };
+                Public = true,
+                MaxAge = TimeSpan.FromSeconds(60)
+            };
 
-                await context.Response.WriteAsync("Hello World! " + DateTime.UtcNow);
-            });
-        }
+            var responseCachingFeature = context.Features.Get<IResponseCachingFeature>();
+            if (responseCachingFeature != null)
+            {
+                responseCachingFeature.VaryByQueryKeys = [ "*" ];
+            }
 
-        public static Task Main(string[] args)
-        {
-            var host = new HostBuilder()
-                .ConfigureWebHost(webHostBuilder =>
-                {
-                    webHostBuilder
-                    .UseKestrel()
-                    .UseContentRoot(Directory.GetCurrentDirectory())
-                    .UseIISIntegration()
-                    .UseStartup<Startup>();
-                }).Build();
+            var user = context.Request.Query["user"].FirstOrDefault() ?? "(none)";
+            var theme = context.Request.Query["theme"].FirstOrDefault() ?? "(none)";
 
-            return host.RunAsync();
-        }
+            context.Response.ContentType = "text/plain";
+            await context.Response.WriteAsync($"User: {user} | Theme: {theme} | Generated: {DateTime.UtcNow:O}");
+        });
+    }
+
+    public static Task Main(string[] args)
+    {
+        var host = new HostBuilder()
+            .ConfigureLogging(logging =>
+            {
+                logging.AddConsole();
+                logging.SetMinimumLevel(LogLevel.Information);
+            })
+            .ConfigureWebHost(webHostBuilder =>
+            {
+                webHostBuilder
+                .UseKestrel()
+                .UseContentRoot(Directory.GetCurrentDirectory())
+                .UseIISIntegration()
+                .UseStartup<Startup>();
+            }).Build();
+
+        return host.RunAsync();
     }
 }

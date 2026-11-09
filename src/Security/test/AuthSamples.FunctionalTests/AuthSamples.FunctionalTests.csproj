@@ -1,66 +1,50 @@
 <Project Sdk="Microsoft.NET.Sdk">
-
   <PropertyGroup>
     <TargetFramework>$(DefaultNetCoreTargetFramework)</TargetFramework>
     <IsSampleProject>false</IsSampleProject>
     <PlatformTarget>AnyCPU</PlatformTarget>
-    <!-- Test asset publishing not working on arm64 https://github.com/dotnet/aspnetcore/issues/11205 -->
-    <SkipHelixArm>true</SkipHelixArm>
   </PropertyGroup>
-
-  <Import Project="$(MvcTestingTargets)" Condition="'$(MvcTestingTargets)' != ''" />
 
   <ItemGroup>
     <ProjectReference Include="$(RepoRoot)src\Hosting\Server.IntegrationTesting\src\Microsoft.AspNetCore.Server.IntegrationTesting.csproj" />
-    <ProjectReference Include="..\..\samples\Cookies\Cookies.csproj" />
-    <ProjectReference Include="..\..\samples\ClaimsTransformation\ClaimsTransformation.csproj" />
-    <ProjectReference Include="..\..\samples\CustomAuthorizationFailureResponse\CustomAuthorizationFailureResponse.csproj" />
-    <ProjectReference Include="..\..\samples\CustomPolicyProvider\CustomPolicyProvider.csproj" />
-    <ProjectReference Include="..\..\samples\DynamicSchemes\DynamicSchemes.csproj" />
-    <ProjectReference Include="..\..\samples\Identity.ExternalClaims\Identity.ExternalClaims.csproj" />
-    <ProjectReference Include="..\..\samples\PathSchemeSelection\PathSchemeSelection.csproj" />
-    <ProjectReference Include="..\..\samples\StaticFilesAuth\StaticFilesAuth.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Security\samples\*\*.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="Microsoft.AspNetCore" />
-    <Reference Include="Microsoft.AspNetCore.Hosting" />
-    <Reference Include="Microsoft.AspNetCore.TestHost" />
-    <Reference Include="Microsoft.AspNetCore.Mvc.Testing" />
-    <Reference Include="AngleSharp" />
+    <PackageReference Include="AngleSharp" />
+
+    <ProjectReference Include="$(RepoRoot)src\Antiforgery\src\Microsoft.AspNetCore.Antiforgery.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Components\Endpoints\src\Microsoft.AspNetCore.Components.Endpoints.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\DefaultBuilder\src\Microsoft.AspNetCore.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Hosting\Abstractions\src\Microsoft.AspNetCore.Hosting.Abstractions.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Hosting\Hosting\src\Microsoft.AspNetCore.Hosting.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Hosting\Server.Abstractions\src\Microsoft.AspNetCore.Hosting.Server.Abstractions.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Hosting\TestHost\src\Microsoft.AspNetCore.TestHost.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Http\Http.Abstractions\src\Microsoft.AspNetCore.Http.Abstractions.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Http\Http.Extensions\src\Microsoft.AspNetCore.Http.Extensions.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Http\Http.Features\src\Microsoft.AspNetCore.Http.Features.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Http\Http\src\Microsoft.AspNetCore.Http.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Http\Routing.Abstractions\src\Microsoft.AspNetCore.Routing.Abstractions.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Http\Routing\src\Microsoft.AspNetCore.Routing.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Middleware\CORS\src\Microsoft.AspNetCore.Cors.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Middleware\Diagnostics.Abstractions\src\Microsoft.AspNetCore.Diagnostics.Abstractions.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Middleware\HostFiltering\src\Microsoft.AspNetCore.HostFiltering.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Middleware\HttpOverrides\src\Microsoft.AspNetCore.HttpOverrides.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Mvc\Mvc.Abstractions\src\Microsoft.AspNetCore.Mvc.Abstractions.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Mvc\Mvc.ApiExplorer\src\Microsoft.AspNetCore.Mvc.ApiExplorer.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Mvc\Mvc.Core\src\Microsoft.AspNetCore.Mvc.Core.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Mvc\Mvc.Cors\src\Microsoft.AspNetCore.Mvc.Cors.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Mvc\Mvc.DataAnnotations\src\Microsoft.AspNetCore.Mvc.DataAnnotations.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Mvc\Mvc.Testing\src\Microsoft.AspNetCore.Mvc.Testing.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Mvc\Mvc\src\Microsoft.AspNetCore.Mvc.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Servers\IIS\IIS\src\Microsoft.AspNetCore.Server.IIS.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Servers\IIS\IISIntegration\src\Microsoft.AspNetCore.Server.IISIntegration.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Servers\Kestrel\Core\src\Microsoft.AspNetCore.Server.Kestrel.Core.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Servers\Kestrel\Kestrel\src\Microsoft.AspNetCore.Server.Kestrel.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Servers\Kestrel\Transport.NamedPipes\src\Microsoft.AspNetCore.Server.Kestrel.Transport.NamedPipes.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Servers\Kestrel\Transport.Quic\src\Microsoft.AspNetCore.Server.Kestrel.Transport.Quic.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Servers\Kestrel\Transport.Sockets\src\Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.csproj" />
   </ItemGroup>
 
-  <Target Name="PublishAssets" AfterTargets="Publish">
-    <ItemGroup>
-      <_PublishFiles Include="$(ArtifactsBinDir)ClaimsTransformation\$(Configuration)\$(DefaultNetCoreTargetFramework)\ClaimsTransformation.deps.json" />
-      <_PublishFiles Include="$(ArtifactsBinDir)Cookies\$(Configuration)\$(DefaultNetCoreTargetFramework)\Cookies.deps.json" />
-      <_PublishFiles Include="$(ArtifactsBinDir)CustomAuthorizationFailureResponse\$(Configuration)\$(DefaultNetCoreTargetFramework)\CustomAuthorizationFailureResponse.deps.json" />
-      <_PublishFiles Include="$(ArtifactsBinDir)CustomPolicyProvider\$(Configuration)\$(DefaultNetCoreTargetFramework)\CustomPolicyProvider.deps.json" />
-      <_PublishFiles Include="$(ArtifactsBinDir)DynamicSchemes\$(Configuration)\$(DefaultNetCoreTargetFramework)\DynamicSchemes.deps.json" />
-      <_PublishFiles Include="$(ArtifactsBinDir)Identity.ExternalClaims\$(Configuration)\$(DefaultNetCoreTargetFramework)\Identity.ExternalClaims.deps.json" />
-      <_PublishFiles Include="$(ArtifactsBinDir)PathSchemeSelection\$(Configuration)\$(DefaultNetCoreTargetFramework)\PathSchemeSelection.deps.json" />
-      <_PublishFiles Include="$(ArtifactsBinDir)StaticFilesAuth\$(Configuration)\$(DefaultNetCoreTargetFramework)\StaticFilesAuth.deps.json" />
-      <_claimsWwwrootFiles Include="$(MSBuildThisFileDirectory)..\..\samples\ClaimsTransformation\wwwroot\**\*.*" />
-      <_cookiesWwwrootFiles Include="$(MSBuildThisFileDirectory)..\..\samples\Cookies\wwwroot\**\*.*" />
-      <_customAuthorizationFailureResponseFiles Include="$(MSBuildThisFileDirectory)..\..\samples\CustomAuthorizationFailureResponse\**\*.*" />
-      <_customProviderFiles Include="$(MSBuildThisFileDirectory)..\..\samples\CustomPolicyProvider\**\*.*" />
-      <_schemesWwwrootFiles Include="$(MSBuildThisFileDirectory)..\..\samples\DynamicSchemes\wwwroot\**\*.*" />
-      <_identityWwwrootFiles Include="$(MSBuildThisFileDirectory)..\..\samples\Identity.ExternalClaims\wwwroot\**\*.*" />
-      <_pathWwwrootFiles Include="$(MSBuildThisFileDirectory)..\..\samples\PathSchemeSelection\wwwroot\**\*.*" />
-      <_staticFiles Include="$(MSBuildThisFileDirectory)..\..\samples\StaticFilesAuth\**\*.*" />
-    </ItemGroup>
-    <Copy SourceFiles="@(_PublishFiles)" DestinationFolder="$(PublishDir)" />
-    <Copy SourceFiles="@(_claimsWwwrootFiles)" DestinationFolder="$(PublishDir)\ClaimsTransformation\wwwroot" />
-    <Copy SourceFiles="@(_cookiesWwwrootFiles)" DestinationFolder="$(PublishDir)\Cookies\wwwroot" />
-    <Copy SourceFiles="@(_customAuthorizationFailureResponseFiles)" DestinationFolder="$(PublishDir)\CustomAuthorizationFailureResponse\\%(RecursiveDir)" />
-    <Copy SourceFiles="@(_customProviderFiles)" DestinationFolder="$(PublishDir)\CustomPolicyProvider\\%(RecursiveDir)" />
-    <Copy SourceFiles="@(_schemesWwwrootFiles)" DestinationFolder="$(PublishDir)\DynamicSchemes\wwwroot" />
-    <Copy SourceFiles="@(_pathWwwrootFiles)" DestinationFolder="$(PublishDir)\Identity.ExternalClaims\wwwroot" />
-    <Copy SourceFiles="@(_schemesWwwrootFiles)" DestinationFolder="$(PublishDir)\PathSchemeSelection\wwwroot" />
-    <Copy SourceFiles="@(_staticFiles)" DestinationFolder="$(PublishDir)\StaticFilesAuth\\%(RecursiveDir)" />
-
-    <!-- Drop a dummy sln to specify content root location -->
-    <WriteLinesToFile File="$(PublishDir)\contentroot.sln" Lines="Ignored" Overwrite="true" Encoding="Unicode" />
-  </Target>
-
+  <Import Project="$(MvcTestingTargets)" Condition="'$(MvcTestingTargets)' != ''" />
 </Project>

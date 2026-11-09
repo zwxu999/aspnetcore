@@ -8,9 +8,6 @@
 #include "ntassert.h"
 #include <CodeAnalysis/Warnings.h>
 
-#pragma warning( push )
-#pragma warning ( disable : ALL_CODE_ANALYSIS_WARNINGS )
-
 /*++
   class MULTISZ:
 
@@ -20,9 +17,6 @@
     This object is derived from BUFFER class.
     It maintains following state:
 
-     m_fValid  - whether this object is valid -
-        used only by MULTISZ() init functions
-        * NYI: I need to kill this someday *
      m_cchLen - string length cached when we update the string.
      m_cStrings - number of strings.
 
@@ -65,23 +59,10 @@ public:
           m_cStrings(0)
     { AuxInit( str.QueryStr()); }
 
-//    BOOL IsValid(VOID) const { return ( BUFFER::IsValid()) ; }
-    //
-    //  Checks and returns TRUE if this string has no valid data else FALSE
-    //
-    BOOL IsEmpty( VOID) const      { return ( *QueryStr() == L'\0'); }
-
     BOOL Append( const WCHAR  * pchInit ) {
-      return ((pchInit != NULL) ? (AuxAppend( pchInit,
-                                              (DWORD) (::wcslen(pchInit)) * sizeof(WCHAR)
+      return ((pchInit != nullptr) ? (AuxAppend( pchInit,
+                                              static_cast<DWORD>(wcslen(pchInit)) * sizeof(WCHAR)
                                               )) :
-              TRUE);
-    }
-
-
-    BOOL Append( const WCHAR  * pchInit, DWORD cchLen ) {
-      return ((pchInit != NULL) ? (AuxAppend( pchInit,
-                                              cchLen * sizeof(WCHAR))) :
               TRUE);
     }
 
@@ -90,7 +71,7 @@ public:
                           (str.QueryCCH()) * sizeof(WCHAR)); }
 
     // Resets the internal string to be NULL string. Buffer remains cached.
-    VOID Reset( VOID)
+    VOID Reset()
     { DBG_ASSERT( QueryPtr() != NULL);
       QueryStr()[0] = L'\0';
       QueryStr()[1] = L'\0';
@@ -100,7 +81,7 @@ public:
 
     BOOL Copy( const WCHAR  * pchInit, IN DWORD cbLen ) {
       if ( QueryPtr() ) { Reset(); }
-      return ( (pchInit != NULL) ?
+      return ( (pchInit != nullptr) ?
                AuxAppend( pchInit, cbLen, FALSE ):
                TRUE);
     }
@@ -112,19 +93,13 @@ public:
     //  Returns the number of bytes in the string including the terminating
     //  NULLs
     //
-    UINT QueryCB( VOID ) const
+    UINT QueryCB() const
         { return ( m_cchLen * sizeof(WCHAR)); }
 
     //
     //  Returns # of characters in the string including the terminating NULLs
     //
-    UINT QueryCCH( VOID ) const { return (m_cchLen); }
-
-    //
-    //  Returns # of strings in the multisz.
-    //
-
-    DWORD QueryStringCount( VOID ) const { return m_cStrings; }
+    UINT QueryCCH() const { return (m_cchLen); }
 
     //
     // Makes a copy of the stored string in given buffer
@@ -134,28 +109,8 @@ public:
     //
     //  Return the string buffer
     //
-    WCHAR * QueryStrA( VOID ) const { return ( QueryStr()); }
-    WCHAR * QueryStr( VOID ) const { return ((WCHAR *) QueryPtr()); }
+    WCHAR * QueryStr() const { return ((WCHAR *) QueryPtr()); }
 
-    //
-    //  Makes a clone of the current string in the string pointer passed in.
-    //
-    BOOL
-      Clone( OUT MULTISZ * pstrClone) const
-        {
-          return ((pstrClone == NULL) ?
-                  (SetLastError(ERROR_INVALID_PARAMETER), FALSE) :
-                  (pstrClone->Copy( *this))
-                  );
-        } // MULTISZ::Clone()
-
-    //
-    //  Recalculates the length of *this because we've modified the buffers
-    //  directly
-    //
-
-    VOID RecalcLen( VOID )
-        { m_cchLen = MULTISZ::CalcLength( QueryStr(), &m_cStrings ); }
 
     //
     // Calculate total character length of a MULTI_SZ, including the
@@ -166,38 +121,20 @@ public:
                                     LPDWORD pcStrings = NULL );
 
     //
-    // Determine if the MULTISZ contains a specific string.
-    //
-
-    BOOL FindString( const WCHAR * str );
-
-    BOOL FindString( STRU & str )
-        { return FindString( str.QueryStr() ); }
-
-    //
-    // Determine if the MULTISZ contains a specific string - case-insensitive
-    //
-
-    BOOL FindStringNoCase( const WCHAR * str );
-
-    BOOL FindStringNoCase( STRU & str )
-        { return FindStringNoCase( str.QueryStr() ); }
-
-    //
     // Used for scanning a multisz.
     //
 
-    const WCHAR * First( VOID ) const
-        { return *QueryStr() == L'\0' ? NULL : QueryStr(); }
+    const WCHAR * First() const
+        { return *QueryStr() == L'\0' ? nullptr : QueryStr(); }
 
     const WCHAR * Next( const WCHAR * Current ) const
-        { Current += ::wcslen( Current ) + 1;
-          return *Current == L'\0' ? NULL : Current; }
+        { Current += wcslen( Current ) + 1;
+          return *Current == L'\0' ? nullptr : Current; }
 
     BOOL
     Equals(
         MULTISZ* pmszRhs
-    );
+    ) const;
 
 private:
 
@@ -209,22 +146,4 @@ private:
 
 };
 
-//
-//  Quick macro for declaring a MULTISZ that will use stack memory of <size>
-//  bytes.  If the buffer overflows then a heap buffer will be allocated
-//
-
-#define STACK_MULTISZ( name, size )     WCHAR __ach##name[size]; \
-                                    MULTISZ name( __ach##name, sizeof( __ach##name ))
-
-HRESULT
-SplitCommaDelimitedString(
-    PCWSTR                      pszList,
-    BOOL                        fTrimEntries,
-    BOOL                        fRemoveEmptyEntries,
-    MULTISZ *                   pmszList
-);
-
-#pragma warning( pop )
-
-#endif // !_MULTISZ_HXX_
+#endif // !_MULTISZ_H_

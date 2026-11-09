@@ -2,10 +2,8 @@
 // Licensed under the MIT License. See License.txt in the project root for license information.
 
 #include <windows.h>
-#include "dbgutil.h"
 #include "reftrace.h"
 
-
 PTRACE_LOG
 CreateRefTraceLog(
     IN LONG LogSize,
@@ -41,7 +39,6 @@ Return Value:
 
 }   // CreateRefTraceLog
 
-
 VOID
 DestroyRefTraceLog(
     IN PTRACE_LOG Log
@@ -67,7 +64,6 @@ Return Value:
 
 }   // DestroyRefTraceLog
 
-
 //
 // N.B. For RtlCaptureBacktrace() to work properly, the calling function
 // *must* be __cdecl, and must have a "normal" stack frame. So, we decorate
@@ -119,9 +115,6 @@ Return Value:
 
 }   // WriteRefTraceLog
 
-
-
-
 LONG
 __cdecl
 WriteRefTraceLogEx(
@@ -162,9 +155,9 @@ Return Value:
 --*/
 {
 
-    REF_TRACE_LOG_ENTRY entry;
-    ULONG hash;
-    DWORD cStackFramesSkipped;
+    REF_TRACE_LOG_ENTRY entry{};
+    ULONG hash = 0;
+    DWORD cStackFramesSkipped = 0;
 
     //
     // Initialize the entry.

@@ -1,52 +1,64 @@
-## Description
-Starting in 5.0, certain areas within the dotnet/aspnetcore and dotnet/extensions repos will require formal *incremental* API reviews before any PRs that change APIs are merged.
+# Getting started
 
-API changes to the following areas are required to go follow this process:
-
-* area-azure
-* area-hosting
-* area-installers
-* area-middleware
-* area-mvc
-    * feature-model-binding
-    * feature-razor-pages
-    * feature-JSONPatch
-    * feature-discovery
-    * feature-formatters
-    * feature-api-explorer
-    * feature-tag-helpers
-* area-security
-* area-servers
-* area-signalr
-* area-websockets
+API changes are reviewed in a separate API proposal issue from the issue that tracks the feature or implementation. When opening an implementation pull request that adds or changes public API, use the [`api-review` skill](/.github/skills/api-review/SKILL.md) to create the proposal issue from the originating issue and pull request.
 
 ## Process
-The goal of the API Review process is to ensure that the new APIs are following common patterns and the best practices.
+
+The goal of the API Review process is to ensure that the new APIs are following common patterns and best practices.
 Also, it's aimed to help and guide engineers towards better API design decisions. People should feel empowered to submit their APIs for review as besides all the benefits it's also a learning and knowledge sharing experience.
 
-The process is visualized in the below diagram:
-![A sequence diagram illustrating the same process described below.](https://user-images.githubusercontent.com/34246760/66542496-95052c80-eae7-11e9-9c7c-549b82a8d492.png)
+The process is visualized in the diagram below:
 
+```mermaid
+flowchart TD
+    identify["Identify an API change or addition"]
+    implementation["Implementation work may begin"]
+    open["Open the implementation PR"]
+    proposal["Use the api-review skill to file a separate API proposal issue"]
+    merge["The implementation PR may become ready or merge"]
+    ready["Apply the api-ready-for-review label and notify the review team"]
+    review["Review the proposal"]
+    approved{"Is the proposal approved?"}
+    label["Apply the api-approved label"]
+    final{"Does the approved proposal match the final implementation?"}
+    verify["Verify the proposal issue has the api-approved label"]
+    rtm["The API may be included in an RTM release"]
 
-1. API review process kicks in after the owner for the issue identifies that the work required for the issue will need an API change or addition. In such cases, the issue owner will handle (either himself/herself, or with the community member who has expressed interest in handling the work) driving a design proposal. When working with a community member, the issue owner is responsible for guiding them to an acceptable design.
-1. If the proposed design adds new APIs, mark those issues with the `api-suggestion` label
-1. When the issue owner thinks the proposal is in a good shape, he/she marks the issue with `api-ready-for-review` label. Also, the @asp-net-api-reviews team should be notified on the issue.
-1. The `asp-net-api-reviews` team will host a weekly API review meeting and will review your proposed API change during the next meeting. If you have an API scheduled for review, you must have a representative in the meeting.
+    identify --> implementation --> open
+    identify -. The proposal may be filed earlier .-> proposal
+    proposal -. Implementation may begin after proposal development .-> implementation
+    open --> proposal
+    open --> merge --> final
+    proposal --> ready --> review --> approved
+    approved -- No --> proposal
+    approved -- Yes --> label --> final
+    final -- No --> proposal
+    final -- Yes --> verify --> rtm
+```
+
+1. The API review process kicks in after the owner of the issue identifies that the work required for the issue will need an API change or addition. In such cases, the issue owner will handle (either himself/herself, or with the community member who has expressed interest in handling the work) driving a design proposal. When working with a community member, the issue owner is responsible for guiding them to an acceptable design.
+1. API review may happen before, during, or after implementation. Contributors may implement the API, open or mark a pull request ready, and merge the work before the proposal receives `api-approved`.
+1. When opening an implementation pull request that adds or changes public API, use the [`api-review` skill](/.github/skills/api-review/SKILL.md) to file a separate API proposal issue. The proposal issue must link to the originating issue and implementation pull request, and use the `api-suggestion` and `api-proposal` labels.
+1. When the issue owner thinks the proposal is in good shape, he/she marks the issue with `api-ready-for-review` label. Also, the @dotnet/aspnet-api-review team should be notified of the issue.
+1. The `aspnet-api-review` team will host a weekly API review meeting and will review your proposed API change during the next meeting. If you have an API scheduled for review, you must have a representative in the meeting.
 1. Some API reviews can happen through a shorter process. For these situations, simply ping the API review crew for a quicker review, so that it can happen as a conversation.
-1. When an API change/suggestion gets approved, the `api-approved` label should be added to the issue.
-1. The owner of the issue is now free to work on the implementation of the proposed API.
-1. In case during implementation changes to the original proposal are required, the review should become obsolete and the process should start from the beginning.
+1. When an API change/suggestion gets approved, the `api-approved` label should be added to the issue. The issue owner is responsible for ensuring that the label covers the final implemented API shape before the API is included in an RTM release.
+1. If implementation changes the proposed or previously approved API shape, update the proposal and return the revised shape to API review before the API is included in an RTM release.
+
+## Learnings and growth
+
+Over time the team will build up certain conventions and principles, that will be useful to establish for future API reviews too. To help with this, the [API Review Principles document](/docs/APIReviewPrinciples.md) document will be used to store such principles and conventions, making them persistent over time. Eventually, it will grow into a good knowledge base that will also help newcomers to learn and be better prepared with designing their APIs.
 
 ## What Makes an issue/PR "ready-for-review"?
 
 Before marking an issue as `api-ready-for-review`, make sure that the issue has the following:
 
-- A short description that will help reviewers not familiar with this area.
-- The API changes in ref-assembly format. It's fine to link this to the generated ref-assembly-code in the PR. If the changes are to an area that does produce ref-assemblies, please write out what it would look like in ref-assembly format for us to review.
+* A short description that will help reviewers not familiar with this area.
+* The API changes in ref-assembly format. It's fine to link this to the generated ref-assembly-code in the PR. If the changes are to an area that does produce ref-assemblies, please write out what it would look like in ref-assembly format for us to review.
 
-```txt
-Good: This is the API for the widget factory, users use it in startup code to 
-configure how their widgets work. We have an overload that accepts URI, but 
+```text
+Good: This is the API for the widget factory, users use it in startup code to
+configure how their widgets work. We have an overload that accepts URI, but
 not one that accepts string, so we're adding it for convenience.
 
 Bad: Adding a string overload for Widget.ConfigureFactory.
@@ -58,14 +70,14 @@ In general, larger changes should have more explanation and context provided, an
 
 ### Why do we do this?
 
-Putting this information in an issue with all of the context makes it possible for discussion to take place before the api-review meeting. Writing things down and posting them online enables remote work as well as our community to give feedback on designs as well. We want to provide enough context for people *working outside that feature area* to understand what the change is about and give meaningful feedback. If you're ready to present an change in the meeting, then you should definitely be ready to explain why it matters.
+Putting this information in an issue with all of the context makes it possible for discussion to take place before the api-review meeting. Writing things down and posting them online enables remote work as well as our community to give feedback on designs as well. We want to provide enough context for people *working outside that feature area* to understand what the change is about and give meaningful feedback. If you're ready to present a change in the meeting, then you should definitely be ready to explain why it matters.
 
 We use the ref-assembly format because it's more readable and useful for the kinds of things that come up in api-review discussions. Using a more compact format (without docs and implementations) makes it easier to notice patterns. In the rare case that you have to manually transcribe this format, think of this as you spending a little time to save a lot of others time in the meeting.
 
 ## If you are the "champion" for a community-submitted change
 
-If you are assigned a community-submitted change to *champion* in our API-review then just put on your pretend pajamas and pretend that it was your change to begin with. Come to the meeting ready to explain why this addition is needed, and why it's the best approach.
+If you are assigned a community-submitted change to *champion* in our API-review, then just put on your pretend pajamas and pretend that it was your change to begin with. Come to the meeting ready to explain why this addition is needed, and why it's the best approach.
 
 ## API Review Meeting
 
-The API Review meeting should be open to any member of the ASP.NET Core team. And invite will be sent to all the team with pre-booked meeting room and time-slot for these meetings to be hosted. Each API review should include the area owners as mandatory attendees.
+The API Review meeting is open to all members of the ASP.NET Core team. The meeting invite as well as communication about API reviews is shared on the internal `ASP.NET Core API Reviews` distribution list. Every API review meeting should include the area owners of the API change proposals as mandatory attendees. To list of all pending API review proposals can be found at: <https://aka.ms/aspnet/apireviews>

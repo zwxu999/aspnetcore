@@ -22,20 +22,23 @@ const PCWSTR HandlerResolver::s_pwzAspnetcoreOutOfProcessRequestHandlerName = L"
 HandlerResolver::HandlerResolver(HMODULE hModule, const IHttpServer &pServer)
     : m_hModule(hModule),
       m_pServer(pServer),
-      m_loadedApplicationHostingModel(HOSTING_UNKNOWN)
+      m_loadedApplicationHostingModel(HOSTING_UNKNOWN),
+      m_shutdownDelay()
 {
+    m_disallowRotationOnConfigChange = false;
     InitializeSRWLock(&m_requestHandlerLoadLock);
 }
 
 HRESULT
 HandlerResolver::LoadRequestHandlerAssembly(const IHttpApplication &pApplication,
+    const std::filesystem::path& shadowCopyPath,
     const ShimOptions& pConfiguration,
     std::unique_ptr<ApplicationFactory>& pApplicationFactory,
     ErrorContext& errorContext)
 {
     HRESULT hr = S_OK;
     PCWSTR pstrHandlerDllName = nullptr;
-    bool preventUnload = false;
+    auto preventUnload = false;
     if (pConfiguration.QueryHostingModel() == APP_HOSTING_MODEL::HOSTING_IN_PROCESS)
     {
         preventUnload = false;
@@ -62,7 +65,7 @@ HandlerResolver::LoadRequestHandlerAssembly(const IHttpApplication &pApplication
             RETURN_IF_FAILED(HostFxrResolutionResult::Create(
                 L"",
                 pConfiguration.QueryProcessPath(),
-                pApplication.GetApplicationPhysicalPath(),
+                shadowCopyPath.empty() ? pApplication.GetApplicationPhysicalPath() : shadowCopyPath,
                 pConfiguration.QueryArguments(),
                 errorContext,
                 options));
@@ -107,7 +110,7 @@ HandlerResolver::LoadRequestHandlerAssembly(const IHttpApplication &pApplication
 
         LOG_INFOF(L"Loading request handler:  '%ls'", handlerDllPath.c_str());
 
-        hRequestHandlerDll = LoadLibrary(handlerDllPath.c_str());
+        hRequestHandlerDll = LoadLibraryEx(handlerDllPath.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
         RETURN_LAST_ERROR_IF_NULL(hRequestHandlerDll);
 
         if (preventUnload)
@@ -125,7 +128,7 @@ HandlerResolver::LoadRequestHandlerAssembly(const IHttpApplication &pApplication
 }
 
 HRESULT
-HandlerResolver::GetApplicationFactory(const IHttpApplication& pApplication, std::unique_ptr<ApplicationFactory>& pApplicationFactory, const ShimOptions& options, ErrorContext& errorContext)
+HandlerResolver::GetApplicationFactory(const IHttpApplication& pApplication, const std::filesystem::path& shadowCopyPath, std::unique_ptr<ApplicationFactory>& pApplicationFactory, const ShimOptions& options, ErrorContext& errorContext)
 {
     SRWExclusiveLock lock(m_requestHandlerLoadLock);
     if (m_loadedApplicationHostingModel != HOSTING_UNKNOWN)
@@ -168,7 +171,10 @@ HandlerResolver::GetApplicationFactory(const IHttpApplication& pApplication, std
 
     m_loadedApplicationHostingModel = options.QueryHostingModel();
     m_loadedApplicationId = pApplication.GetApplicationId();
-    RETURN_IF_FAILED(LoadRequestHandlerAssembly(pApplication, options, pApplicationFactory, errorContext));
+    m_disallowRotationOnConfigChange = options.QueryDisallowRotationOnConfigChange();
+    m_shutdownDelay = options.QueryShutdownDelay();
+
+    RETURN_IF_FAILED(LoadRequestHandlerAssembly(pApplication, shadowCopyPath, options, pApplicationFactory, errorContext));
 
     return S_OK;
 }
@@ -179,6 +185,23 @@ void HandlerResolver::ResetHostingModel()
 
     m_loadedApplicationHostingModel = APP_HOSTING_MODEL::HOSTING_UNKNOWN;
     m_loadedApplicationId.resize(0);
+}
+
+APP_HOSTING_MODEL HandlerResolver::GetHostingModel()
+{
+    SRWExclusiveLock lock(m_requestHandlerLoadLock);
+
+    return m_loadedApplicationHostingModel;
+}
+
+bool HandlerResolver::GetDisallowRotationOnConfigChange()
+{
+    return m_disallowRotationOnConfigChange;
+}
+
+std::chrono::milliseconds HandlerResolver::GetShutdownDelay() const
+{
+    return m_shutdownDelay;
 }
 
 HRESULT
@@ -231,7 +254,7 @@ HandlerResolver::FindNativeAssemblyFromHostfxr(
     std::wstring& handlerDllPath,
     const IHttpApplication &pApplication,
     const ShimOptions& pConfiguration,
-    std::shared_ptr<StringStreamRedirectionOutput> stringRedirectionOutput,
+    const std::shared_ptr<StringStreamRedirectionOutput>& stringRedirectionOutput,
     ErrorContext& errorContext
 )
 try
@@ -263,7 +286,7 @@ try
                 stringRedirectionOutput
             );
 
-        StandardStreamRedirection stdOutRedirection(*redirectionOutput.get(), m_pServer.IsCommandLineLaunch());
+        StandardStreamRedirection stdOutRedirection(*redirectionOutput, m_pServer.IsCommandLineLaunch());
         auto hostFxrErrorRedirection = m_hHostFxrDll.RedirectOutput(redirectionOutput.get());
 
         struNativeSearchPaths.resize(dwBufferSize);
@@ -286,7 +309,7 @@ try
             {
                 break;
             }
-            else if (dwRequiredBufferSize > dwBufferSize)
+            if (dwRequiredBufferSize > dwBufferSize)
             {
                 dwBufferSize = dwRequiredBufferSize + 1; // for null terminator
 
@@ -305,10 +328,21 @@ try
                 errorContext.generalErrorType = "Failed to load ASP.NET Core runtime";
                 errorContext.errorReason = "The specified version of Microsoft.NetCore.App or Microsoft.AspNetCore.App was not found.";
 
-                EventLog::Error(
-                    ASPNETCORE_EVENT_GENERAL_ERROR,
-                    ASPNETCORE_EVENT_HOSTFXR_FAILURE_MSG
-                );
+                if (intHostFxrExitCode == AppArgNotRunnable)
+                {
+                    errorContext.detailedErrorContent = "Provided application path does not exist, or isn't a .dll or .exe.";
+                    EventLog::Error(
+                        ASPNETCORE_EVENT_GENERAL_ERROR,
+                        ASPNETCORE_EVENT_HOSTFXR_BAD_APPLICATION_FAILURE_MSG
+                    );
+                }
+                else
+                {
+                    EventLog::Error(
+                        ASPNETCORE_EVENT_GENERAL_ERROR,
+                        ASPNETCORE_EVENT_HOSTFXR_FAILURE_MSG
+                    );
+                }
 
                 return E_UNEXPECTED;
             }

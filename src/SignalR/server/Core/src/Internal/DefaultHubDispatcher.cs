@@ -1,652 +1,1055 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
-using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Reflection;
 using System.Security.Claims;
-using System.Threading;
 using System.Threading.Channels;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Internal;
+using Microsoft.AspNetCore.Shared;
 using Microsoft.AspNetCore.SignalR.Protocol;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Internal;
 using Microsoft.Extensions.Logging;
+using Log = Microsoft.AspNetCore.SignalR.Internal.DefaultHubDispatcherLog;
 
-namespace Microsoft.AspNetCore.SignalR.Internal
+namespace Microsoft.AspNetCore.SignalR.Internal;
+
+internal sealed partial class DefaultHubDispatcher<[DynamicallyAccessedMembers(Hub.DynamicallyAccessedMembers)] THub> : HubDispatcher<THub> where THub : Hub
 {
-    internal partial class DefaultHubDispatcher<THub> : HubDispatcher<THub> where THub : Hub
+    private static readonly string _fullHubName = typeof(THub).FullName ?? typeof(THub).Name;
+
+    // The most tags added to an activity: 3 hub tags (rpc.method, rpc.system, rpc.service) and
+    // 4 connection endpoint tags (server.address, server.port, network.type, network.transport).
+    private const int MaxActivityTags = 7;
+
+    [ThreadStatic]
+    private static List<KeyValuePair<string, object?>>? t_activityTags;
+
+    private readonly Dictionary<string, HubMethodDescriptor> _methods = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Utf8HashLookup _cachedMethodNames = new();
+    private readonly IServiceScopeFactory _serviceScopeFactory;
+    private readonly IHubContext<THub> _hubContext;
+    private readonly ILogger<HubDispatcher<THub>> _logger;
+    private readonly bool _enableDetailedErrors;
+    private readonly Func<HubInvocationContext, ValueTask<object?>>? _invokeMiddleware;
+    private readonly Func<HubLifetimeContext, Task>? _onConnectedMiddleware;
+    private readonly Func<HubLifetimeContext, Exception?, Task>? _onDisconnectedMiddleware;
+    private readonly HubLifetimeManager<THub> _hubLifetimeManager;
+
+    [FeatureSwitchDefinition("Microsoft.AspNetCore.SignalR.Hub.IsCustomAwaitableSupported")]
+    [FeatureGuard(typeof(RequiresDynamicCodeAttribute))]
+    [FeatureGuard(typeof(RequiresUnreferencedCodeAttribute))]
+    private static bool IsCustomAwaitableSupported { get; } =
+        AppContext.TryGetSwitch("Microsoft.AspNetCore.SignalR.Hub.IsCustomAwaitableSupported", out bool customAwaitableSupport) ? customAwaitableSupport : true;
+
+    public DefaultHubDispatcher(IServiceScopeFactory serviceScopeFactory, IHubContext<THub> hubContext, bool enableDetailedErrors,
+        bool disableImplicitFromServiceParameters, ILogger<DefaultHubDispatcher<THub>> logger, List<IHubFilter>? hubFilters, HubLifetimeManager<THub> lifetimeManager)
     {
-        private readonly Dictionary<string, HubMethodDescriptor> _methods = new Dictionary<string, HubMethodDescriptor>(StringComparer.OrdinalIgnoreCase);
-        private readonly IServiceScopeFactory _serviceScopeFactory;
-        private readonly IHubContext<THub> _hubContext;
-        private readonly ILogger<HubDispatcher<THub>> _logger;
-        private readonly bool _enableDetailedErrors;
-        private readonly Func<HubInvocationContext, ValueTask<object>> _invokeMiddleware;
-        private readonly Func<HubLifetimeContext, Task> _onConnectedMiddleware;
-        private readonly Func<HubLifetimeContext, Exception, Task> _onDisconnectedMiddleware;
+        _serviceScopeFactory = serviceScopeFactory;
+        _hubContext = hubContext;
+        _enableDetailedErrors = enableDetailedErrors;
+        _logger = logger;
+        _hubLifetimeManager = lifetimeManager;
+        DiscoverHubMethods(disableImplicitFromServiceParameters);
 
-        public DefaultHubDispatcher(IServiceScopeFactory serviceScopeFactory, IHubContext<THub> hubContext, bool enableDetailedErrors,
-            ILogger<DefaultHubDispatcher<THub>> logger, List<IHubFilter> hubFilters)
+        var count = hubFilters?.Count ?? 0;
+        if (count != 0)
         {
-            _serviceScopeFactory = serviceScopeFactory;
-            _hubContext = hubContext;
-            _enableDetailedErrors = enableDetailedErrors;
-            _logger = logger;
-            DiscoverHubMethods();
-
-            var count = hubFilters?.Count ?? 0;
-            if (count != 0)
+            _invokeMiddleware = (invocationContext) =>
             {
-                _invokeMiddleware = (invocationContext) =>
+                var arguments = invocationContext.HubMethodArguments as object?[] ?? invocationContext.HubMethodArguments.ToArray();
+                if (invocationContext.ObjectMethodExecutor != null)
                 {
-                    var arguments = invocationContext.HubMethodArguments as object[] ?? invocationContext.HubMethodArguments.ToArray();
-                    if (invocationContext.ObjectMethodExecutor != null)
-                    {
-                        return ExecuteMethod(invocationContext.ObjectMethodExecutor, invocationContext.Hub, arguments);
-                    }
-                    return ExecuteMethod(invocationContext.HubMethod.Name, invocationContext.Hub, arguments);
-                };
-
-                _onConnectedMiddleware = (context) => context.Hub.OnConnectedAsync();
-                _onDisconnectedMiddleware = (context, exception) => context.Hub.OnDisconnectedAsync(exception);
-
-                for (var i = count - 1; i > -1; i--)
-                {
-                    var resolvedFilter = hubFilters[i];
-                    var nextFilter = _invokeMiddleware;
-                    _invokeMiddleware = (context) => resolvedFilter.InvokeMethodAsync(context, nextFilter);
-
-                    var connectedFilter = _onConnectedMiddleware;
-                    _onConnectedMiddleware = (context) => resolvedFilter.OnConnectedAsync(context, connectedFilter);
-
-                    var disconnectedFilter = _onDisconnectedMiddleware;
-                    _onDisconnectedMiddleware = (context, exception) => resolvedFilter.OnDisconnectedAsync(context, exception, disconnectedFilter);
+                    return ExecuteMethod(invocationContext.ObjectMethodExecutor, invocationContext.Hub, arguments);
                 }
+                return ExecuteMethod(invocationContext.HubMethod.Name, invocationContext.Hub, arguments);
+            };
+
+            _onConnectedMiddleware = (context) => context.Hub.OnConnectedAsync();
+            _onDisconnectedMiddleware = (context, exception) => context.Hub.OnDisconnectedAsync(exception);
+
+            for (var i = count - 1; i > -1; i--)
+            {
+                var resolvedFilter = hubFilters![i];
+                var nextFilter = _invokeMiddleware;
+                _invokeMiddleware = (context) => resolvedFilter.InvokeMethodAsync(context, nextFilter);
+
+                var connectedFilter = _onConnectedMiddleware;
+                _onConnectedMiddleware = (context) => resolvedFilter.OnConnectedAsync(context, connectedFilter);
+
+                var disconnectedFilter = _onDisconnectedMiddleware;
+                _onDisconnectedMiddleware = (context, exception) => resolvedFilter.OnDisconnectedAsync(context, exception, disconnectedFilter);
             }
         }
+    }
 
-        public override async Task OnConnectedAsync(HubConnectionContext connection)
+    public override async Task OnConnectedAsync(HubConnectionContext connection)
+    {
+        await using var scope = _serviceScopeFactory.CreateAsyncScope();
+
+        var hubActivator = scope.ServiceProvider.GetRequiredService<IHubActivator<THub>>();
+        var hub = hubActivator.Create();
+        Activity? activity = null;
+        try
         {
-            IServiceScope scope = null;
+            var hubCallerContext = connection.HubCallerContext;
+            // OnConnectedAsync won't work with client results (ISingleClientProxy.InvokeAsync)
+            InitializeHub(hub, connection, hubCallerContext, invokeAllowed: false);
 
-            try
+            activity = StartActivity(SignalRServerActivitySource.OnConnected, ActivityKind.Internal, links: null, scope.ServiceProvider, nameof(hub.OnConnectedAsync), headers: null, _logger, connection);
+
+            if (_onConnectedMiddleware != null)
             {
-                scope = _serviceScopeFactory.CreateScope();
-
-                var hubActivator = scope.ServiceProvider.GetRequiredService<IHubActivator<THub>>();
-                var hub = hubActivator.Create();
-                try
-                {
-                    InitializeHub(hub, connection);
-
-                    if (_onConnectedMiddleware != null)
-                    {
-                        var context = new HubLifetimeContext(connection.HubCallerContext, scope.ServiceProvider, hub);
-                        await _onConnectedMiddleware(context);
-                    }
-                    else
-                    {
-                        await hub.OnConnectedAsync();
-                    }
-                }
-                finally
-                {
-                    hubActivator.Release(hub);
-                }
+                var context = new HubLifetimeContext(hubCallerContext, scope.ServiceProvider, hub);
+                await _onConnectedMiddleware(context);
             }
-            finally
+            else
             {
-                await scope.DisposeAsync();
+                await hub.OnConnectedAsync();
             }
         }
-
-        public override async Task OnDisconnectedAsync(HubConnectionContext connection, Exception exception)
+        catch (Exception ex)
         {
-            IServiceScope scope = null;
+            SetActivityError(activity, ex);
+            throw;
+        }
+        finally
+        {
+            activity?.Stop();
+            hubActivator.Release(hub);
+        }
+    }
 
-            try
+    public override async Task OnDisconnectedAsync(HubConnectionContext connection, Exception? exception)
+    {
+        await using var scope = _serviceScopeFactory.CreateAsyncScope();
+
+        var hubActivator = scope.ServiceProvider.GetRequiredService<IHubActivator<THub>>();
+        var hub = hubActivator.Create();
+        Activity? activity = null;
+        try
+        {
+            var hubCallerContext = connection.HubCallerContext;
+            InitializeHub(hub, connection, hubCallerContext);
+
+            activity = StartActivity(SignalRServerActivitySource.OnDisconnected, ActivityKind.Internal, links: null, scope.ServiceProvider, nameof(hub.OnDisconnectedAsync), headers: null, _logger, connection);
+
+            if (_onDisconnectedMiddleware != null)
             {
-                scope = _serviceScopeFactory.CreateScope();
-
-                var hubActivator = scope.ServiceProvider.GetRequiredService<IHubActivator<THub>>();
-                var hub = hubActivator.Create();
-                try
-                {
-                    InitializeHub(hub, connection);
-
-                    if (_onDisconnectedMiddleware != null)
-                    {
-                        var context = new HubLifetimeContext(connection.HubCallerContext, scope.ServiceProvider, hub);
-                        await _onDisconnectedMiddleware(context, exception);
-                    }
-                    else
-                    {
-                        await hub.OnDisconnectedAsync(exception);
-                    }
-                }
-                finally
-                {
-                    hubActivator.Release(hub);
-                }
+                var context = new HubLifetimeContext(hubCallerContext, scope.ServiceProvider, hub);
+                await _onDisconnectedMiddleware(context, exception);
             }
-            finally
+            else
             {
-                await scope.DisposeAsync();
+                await hub.OnDisconnectedAsync(exception);
             }
         }
-
-        public override Task DispatchMessageAsync(HubConnectionContext connection, HubMessage hubMessage)
+        catch (Exception ex)
         {
-            // Messages are dispatched sequentially and will stop other messages from being processed until they complete.
-            // Streaming methods will run sequentially until they start streaming, then they will fire-and-forget allowing other messages to run.
+            SetActivityError(activity, ex);
+            throw;
+        }
+        finally
+        {
+            activity?.Stop();
+            hubActivator.Release(hub);
+        }
+    }
 
-            switch (hubMessage)
-            {
-                case InvocationBindingFailureMessage bindingFailureMessage:
-                    return ProcessInvocationBindingFailure(connection, bindingFailureMessage);
+    public override Task OnAuthenticationRefreshedAsync(HubConnectionContext connection)
+    {
+        // Acquire the per-connection invocation limit so that OnAuthenticationRefreshedAsync interleaves with hub method
+        // invocations the same way other invocations do (respecting MaximumParallelInvocations).
+        return connection.ActiveInvocationLimit.RunAsync(static state =>
+        {
+            var (dispatcher, connection) = state;
+            return dispatcher.InvokeOnAuthenticationRefreshedAsync(connection);
+        }, (this, connection)).AsTask();
+    }
 
-                case StreamBindingFailureMessage bindingFailureMessage:
-                    return ProcessStreamBindingFailure(connection, bindingFailureMessage);
+    private async Task<bool> InvokeOnAuthenticationRefreshedAsync(HubConnectionContext connection)
+    {
+        await using var scope = _serviceScopeFactory.CreateAsyncScope();
 
-                case InvocationMessage invocationMessage:
-                    Log.ReceivedHubInvocation(_logger, invocationMessage);
-                    return ProcessInvocation(connection, invocationMessage, isStreamResponse: false);
+        var hubActivator = scope.ServiceProvider.GetRequiredService<IHubActivator<THub>>();
+        var hub = hubActivator.Create();
+        Activity? activity = null;
+        try
+        {
+            var hubCallerContext = connection.HubCallerContext;
+            InitializeHub(hub, connection, hubCallerContext, invokeAllowed: false);
 
-                case StreamInvocationMessage streamInvocationMessage:
-                    Log.ReceivedStreamHubInvocation(_logger, streamInvocationMessage);
-                    return ProcessInvocation(connection, streamInvocationMessage, isStreamResponse: true);
+            activity = StartActivity(SignalRServerActivitySource.OnAuthenticationRefreshed, ActivityKind.Internal, links: null, scope.ServiceProvider, nameof(hub.OnAuthenticationRefreshedAsync), headers: null, _logger, connection);
 
-                case CancelInvocationMessage cancelInvocationMessage:
-                    // Check if there is an associated active stream and cancel it if it exists.
-                    // The cts will be removed when the streaming method completes executing
-                    if (connection.ActiveRequestCancellationSources.TryGetValue(cancelInvocationMessage.InvocationId, out var cts))
-                    {
-                        Log.CancelStream(_logger, cancelInvocationMessage.InvocationId);
-                        cts.Cancel();
-                    }
-                    else
-                    {
-                        // Stream can be canceled on the server while client is canceling stream.
-                        Log.UnexpectedCancel(_logger);
-                    }
-                    break;
+            await hub.OnAuthenticationRefreshedAsync();
+        }
+        catch (Exception ex)
+        {
+            // Must not throw out of a ChannelBasedSemaphore.RunAsync callback.
+            SetActivityError(activity, ex);
+            Log.FailedInvokingHubMethod(_logger, nameof(Hub.OnAuthenticationRefreshedAsync), ex);
+        }
+        finally
+        {
+            activity?.Stop();
+            hubActivator.Release(hub);
+        }
 
-                case PingMessage _:
-                    connection.StartClientTimeout();
-                    break;
+        // Release the semaphore so other invocations can proceed.
+        return true;
+    }
 
-                case StreamItemMessage streamItem:
-                    return ProcessStreamItem(connection, streamItem);
+    public override Task DispatchMessageAsync(HubConnectionContext connection, HubMessage hubMessage)
+    {
+        // Messages are dispatched sequentially and will stop other messages from being processed until they complete.
+        // Streaming methods will run sequentially until they start streaming, then they will fire-and-forget allowing other messages to run.
 
-                case CompletionMessage streamCompleteMessage:
-                    // closes channels, removes from Lookup dict
-                    // user's method can see the channel is complete and begin wrapping up
-                    if (connection.StreamTracker.TryComplete(streamCompleteMessage))
-                    {
-                        Log.CompletingStream(_logger, streamCompleteMessage);
-                    }
-                    else
-                    {
-                        Log.UnexpectedStreamCompletion(_logger);
-                    }
-                    break;
+        // With parallel invokes enabled, messages run sequentially until they go async and then the next message will be allowed to start running.
 
-                // Other kind of message we weren't expecting
-                default:
-                    Log.UnsupportedMessageReceived(_logger, hubMessage.GetType().FullName);
-                    throw new NotSupportedException($"Received unsupported message: {hubMessage}");
-            }
-
+        if (!connection.ShouldProcessMessage(hubMessage))
+        {
+            Log.DroppingMessage(_logger, hubMessage.GetType().Name, (hubMessage as HubInvocationMessage)?.InvocationId ?? "(null)");
             return Task.CompletedTask;
         }
 
-        private Task ProcessInvocationBindingFailure(HubConnectionContext connection, InvocationBindingFailureMessage bindingFailureMessage)
+        switch (hubMessage)
         {
-            Log.InvalidHubParameters(_logger, bindingFailureMessage.Target, bindingFailureMessage.BindingFailure.SourceException);
+            case InvocationBindingFailureMessage bindingFailureMessage:
+                return ProcessInvocationBindingFailure(connection, bindingFailureMessage);
 
-            var errorMessage = ErrorMessageHelper.BuildErrorMessage($"Failed to invoke '{bindingFailureMessage.Target}' due to an error on the server.",
-                bindingFailureMessage.BindingFailure.SourceException, _enableDetailedErrors);
-            return SendInvocationError(bindingFailureMessage.InvocationId, connection, errorMessage);
+            case StreamBindingFailureMessage bindingFailureMessage:
+                return ProcessStreamBindingFailure(connection, bindingFailureMessage);
+
+            case InvocationMessage invocationMessage:
+                Log.ReceivedHubInvocation(_logger, invocationMessage);
+                return ProcessInvocation(connection, invocationMessage, isStreamResponse: false);
+
+            case StreamInvocationMessage streamInvocationMessage:
+                Log.ReceivedStreamHubInvocation(_logger, streamInvocationMessage);
+                return ProcessInvocation(connection, streamInvocationMessage, isStreamResponse: true);
+
+            case CancelInvocationMessage cancelInvocationMessage:
+                // Check if there is an associated active invocation or stream and cancel it if it exists.
+                // The cts will be removed when the hub method completes executing
+                if (connection.TryGetActiveRequestCancellationSource(cancelInvocationMessage.InvocationId!, out var cts))
+                {
+                    Log.CancelInvocation(_logger, cancelInvocationMessage.InvocationId!);
+                    cts.Cancel();
+                }
+                else
+                {
+                    // Invocation can be canceled on the server while client is canceling invocation.
+                    Log.UnexpectedCancelWithId(_logger, cancelInvocationMessage.InvocationId!);
+                }
+                break;
+
+            case PingMessage _:
+                connection.StartClientTimeout();
+                break;
+
+            case StreamItemMessage streamItem:
+                return ProcessStreamItem(connection, streamItem);
+
+            case CompletionMessage completionMessage:
+                // closes channels, removes from Lookup dict
+                // user's method can see the channel is complete and begin wrapping up
+                if (connection.StreamTracker.TryComplete(completionMessage))
+                {
+                    Log.CompletingStream(_logger, completionMessage);
+                }
+                // InvocationId is always required on CompletionMessage, it's nullable because of the base type
+                else if (_hubLifetimeManager.TryGetReturnType(completionMessage.InvocationId!, out _))
+                {
+                    return _hubLifetimeManager.SetConnectionResultAsync(connection.ConnectionId, completionMessage);
+                }
+                else
+                {
+                    Log.UnexpectedCompletion(_logger, completionMessage.InvocationId!);
+                }
+                break;
+
+            case AckMessage ackMessage:
+                Log.ReceivedAckMessage(_logger, ackMessage.SequenceId);
+                return connection.AckAsync(ackMessage);
+
+            case SequenceMessage sequenceMessage:
+                Log.ReceivedSequenceMessage(_logger, sequenceMessage.SequenceId);
+                break;
+
+            case CloseMessage closeMessage:
+                connection.CloseMessage = closeMessage;
+                connection.Abort();
+                break;
+
+            // Other kind of message we weren't expecting
+            default:
+                Log.UnsupportedMessageReceived(_logger, hubMessage.GetType().FullName!);
+                throw new NotSupportedException($"Received unsupported message: {hubMessage}");
         }
 
-        private Task ProcessStreamBindingFailure(HubConnectionContext connection, StreamBindingFailureMessage bindingFailureMessage)
+        return Task.CompletedTask;
+    }
+
+    private Task ProcessInvocationBindingFailure(HubConnectionContext connection, InvocationBindingFailureMessage bindingFailureMessage)
+    {
+        Log.InvalidHubParameters(_logger, bindingFailureMessage.Target, bindingFailureMessage.BindingFailure.SourceException);
+
+        var errorMessage = ErrorMessageHelper.BuildErrorMessage($"Failed to invoke '{bindingFailureMessage.Target}' due to an error on the server.",
+            bindingFailureMessage.BindingFailure.SourceException, _enableDetailedErrors);
+        return SendInvocationError(bindingFailureMessage.InvocationId, connection, errorMessage);
+    }
+
+    private Task ProcessStreamBindingFailure(HubConnectionContext connection, StreamBindingFailureMessage bindingFailureMessage)
+    {
+        var errorString = ErrorMessageHelper.BuildErrorMessage(
+            "Failed to bind Stream message.",
+            bindingFailureMessage.BindingFailure.SourceException, _enableDetailedErrors);
+
+        var message = CompletionMessage.WithError(bindingFailureMessage.Id, errorString);
+        Log.ClosingStreamWithBindingError(_logger, message);
+
+        // ignore failure, it means the client already completed the stream or the stream never existed on the server
+        connection.StreamTracker.TryComplete(message);
+
+        // TODO: Send stream completion message to client when we add it
+        return Task.CompletedTask;
+    }
+
+    private Task ProcessStreamItem(HubConnectionContext connection, StreamItemMessage message)
+    {
+        if (!connection.StreamTracker.TryProcessItem(message, out var processTask))
         {
-            var errorString = ErrorMessageHelper.BuildErrorMessage(
-                "Failed to bind Stream message.",
-                bindingFailureMessage.BindingFailure.SourceException, _enableDetailedErrors);
-
-            var message = CompletionMessage.WithError(bindingFailureMessage.Id, errorString);
-            Log.ClosingStreamWithBindingError(_logger, message);
-
-            // ignore failure, it means the client already completed the stream or the stream never existed on the server
-            connection.StreamTracker.TryComplete(message);
-
-            // TODO: Send stream completion message to client when we add it
-
+            Log.UnexpectedStreamItem(_logger);
             return Task.CompletedTask;
         }
 
-        private Task ProcessStreamItem(HubConnectionContext connection, StreamItemMessage message)
-        {
-            if (!connection.StreamTracker.TryProcessItem(message, out var processTask))
-            {
-                Log.UnexpectedStreamItem(_logger);
-                return Task.CompletedTask;
-            }
+        Log.ReceivedStreamItem(_logger, message);
+        return processTask;
+    }
 
-            Log.ReceivedStreamItem(_logger, message);
-            return processTask;
-        }
-
-        private Task ProcessInvocation(HubConnectionContext connection,
-            HubMethodInvocationMessage hubMethodInvocationMessage, bool isStreamResponse)
+    private Task ProcessInvocation(HubConnectionContext connection,
+        HubMethodInvocationMessage hubMethodInvocationMessage, bool isStreamResponse)
+    {
+        if (!_methods.TryGetValue(hubMethodInvocationMessage.Target, out var descriptor))
         {
-            if (!_methods.TryGetValue(hubMethodInvocationMessage.Target, out var descriptor))
+            Log.UnknownHubMethod(_logger, hubMethodInvocationMessage.Target);
+
+            if (!string.IsNullOrEmpty(hubMethodInvocationMessage.InvocationId))
             {
                 // Send an error to the client. Then let the normal completion process occur
-                Log.UnknownHubMethod(_logger, hubMethodInvocationMessage.Target);
                 return connection.WriteAsync(CompletionMessage.WithError(
                     hubMethodInvocationMessage.InvocationId, $"Unknown hub method '{hubMethodInvocationMessage.Target}'")).AsTask();
             }
             else
             {
-                bool isStreamCall = descriptor.StreamingParameters != null;
-                return Invoke(descriptor, connection, hubMethodInvocationMessage, isStreamResponse, isStreamCall);
+                return Task.CompletedTask;
             }
         }
-
-        private async Task Invoke(HubMethodDescriptor descriptor, HubConnectionContext connection,
-            HubMethodInvocationMessage hubMethodInvocationMessage, bool isStreamResponse, bool isStreamCall)
+        else
         {
-            var methodExecutor = descriptor.MethodExecutor;
-
-            var disposeScope = true;
-            var scope = _serviceScopeFactory.CreateScope();
-            IHubActivator<THub> hubActivator = null;
-            THub hub = null;
-            try
+            bool isStreamCall = descriptor.StreamingParameters != null;
+            if (!isStreamCall && !isStreamResponse)
             {
-                hubActivator = scope.ServiceProvider.GetRequiredService<IHubActivator<THub>>();
-                hub = hubActivator.Create();
-
-                if (!await IsHubMethodAuthorized(scope.ServiceProvider, connection, descriptor, hubMethodInvocationMessage.Arguments, hub))
+                return connection.ActiveInvocationLimit.RunAsync(static state =>
                 {
-                    Log.HubMethodNotAuthorized(_logger, hubMethodInvocationMessage.Target);
-                    await SendInvocationError(hubMethodInvocationMessage.InvocationId, connection,
-                        $"Failed to invoke '{hubMethodInvocationMessage.Target}' because user is unauthorized");
-                    return;
-                }
-
-                if (!await ValidateInvocationMode(descriptor, isStreamResponse, hubMethodInvocationMessage, connection))
-                {
-                    return;
-                }
-
-                try
-                {
-                    var clientStreamLength = hubMethodInvocationMessage.StreamIds?.Length ?? 0;
-                    var serverStreamLength = descriptor.StreamingParameters?.Count ?? 0;
-                    if (clientStreamLength != serverStreamLength)
-                    {
-                        var ex = new HubException($"Client sent {clientStreamLength} stream(s), Hub method expects {serverStreamLength}.");
-                        Log.InvalidHubParameters(_logger, hubMethodInvocationMessage.Target, ex);
-                        await SendInvocationError(hubMethodInvocationMessage.InvocationId, connection,
-                            ErrorMessageHelper.BuildErrorMessage($"An unexpected error occurred invoking '{hubMethodInvocationMessage.Target}' on the server.", ex, _enableDetailedErrors));
-                        return;
-                    }
-
-                    InitializeHub(hub, connection);
-                    Task invocation = null;
-
-                    CancellationTokenSource cts = null;
-                    var arguments = hubMethodInvocationMessage.Arguments;
-                    if (descriptor.HasSyntheticArguments)
-                    {
-                        // In order to add the synthetic arguments we need a new array because the invocation array is too small (it doesn't know about synthetic arguments)
-                        arguments = new object[descriptor.OriginalParameterTypes.Count];
-
-                        var streamPointer = 0;
-                        var hubInvocationArgumentPointer = 0;
-                        for (var parameterPointer = 0; parameterPointer < arguments.Length; parameterPointer++)
-                        {
-                            if (hubMethodInvocationMessage.Arguments.Length > hubInvocationArgumentPointer &&
-                                (hubMethodInvocationMessage.Arguments[hubInvocationArgumentPointer] == null ||
-                                descriptor.OriginalParameterTypes[parameterPointer].IsAssignableFrom(hubMethodInvocationMessage.Arguments[hubInvocationArgumentPointer].GetType())))
-                            {
-                                // The types match so it isn't a synthetic argument, just copy it into the arguments array
-                                arguments[parameterPointer] = hubMethodInvocationMessage.Arguments[hubInvocationArgumentPointer];
-                                hubInvocationArgumentPointer++;
-                            }
-                            else
-                            {
-                                if (descriptor.OriginalParameterTypes[parameterPointer] == typeof(CancellationToken))
-                                {
-                                    cts = CancellationTokenSource.CreateLinkedTokenSource(connection.ConnectionAborted);
-                                    arguments[parameterPointer] = cts.Token;
-                                }
-                                else if (isStreamCall && ReflectionHelper.IsStreamingType(descriptor.OriginalParameterTypes[parameterPointer], mustBeDirectType: true))
-                                {
-                                    Log.StartingParameterStream(_logger, hubMethodInvocationMessage.StreamIds[streamPointer]);
-                                    var itemType = descriptor.StreamingParameters[streamPointer];
-                                    arguments[parameterPointer] = connection.StreamTracker.AddStream(hubMethodInvocationMessage.StreamIds[streamPointer],
-                                        itemType, descriptor.OriginalParameterTypes[parameterPointer]);
-
-                                    streamPointer++;
-                                }
-                                else
-                                {
-                                    // This should never happen
-                                    Debug.Assert(false, $"Failed to bind argument of type '{descriptor.OriginalParameterTypes[parameterPointer].Name}' for hub method '{methodExecutor.MethodInfo.Name}'.");
-                                }
-                            }
-                        }
-                    }
-
-                    if (isStreamResponse)
-                    {
-                        var result = await ExecuteHubMethod(methodExecutor, hub, arguments, connection, scope.ServiceProvider);
-
-                        if (result == null)
-                        {
-                            Log.InvalidReturnValueFromStreamingMethod(_logger, methodExecutor.MethodInfo.Name);
-                            await SendInvocationError(hubMethodInvocationMessage.InvocationId, connection,
-                                $"The value returned by the streaming method '{methodExecutor.MethodInfo.Name}' is not a ChannelReader<> or IAsyncEnumerable<>.");
-                            return;
-                        }
-
-                        cts = cts ?? CancellationTokenSource.CreateLinkedTokenSource(connection.ConnectionAborted);
-                        connection.ActiveRequestCancellationSources.TryAdd(hubMethodInvocationMessage.InvocationId, cts);
-                        var enumerable = descriptor.FromReturnedStream(result, cts.Token);
-
-                        Log.StreamingResult(_logger, hubMethodInvocationMessage.InvocationId, methodExecutor);
-                        _ = StreamResultsAsync(hubMethodInvocationMessage.InvocationId, connection, enumerable, scope, hubActivator, hub, cts, hubMethodInvocationMessage);
-                    }
-                    else
-                    {
-                        // Invoke or Send
-                        async Task ExecuteInvocation()
-                        {
-                            object result;
-                            try
-                            {
-                                result = await ExecuteHubMethod(methodExecutor, hub, arguments, connection, scope.ServiceProvider);
-                                Log.SendingResult(_logger, hubMethodInvocationMessage.InvocationId, methodExecutor);
-                            }
-                            catch (Exception ex)
-                            {
-                                Log.FailedInvokingHubMethod(_logger, hubMethodInvocationMessage.Target, ex);
-                                await SendInvocationError(hubMethodInvocationMessage.InvocationId, connection,
-                                    ErrorMessageHelper.BuildErrorMessage($"An unexpected error occurred invoking '{hubMethodInvocationMessage.Target}' on the server.", ex, _enableDetailedErrors));
-                                return;
-                            }
-                            finally
-                            {
-                                // Stream response handles cleanup in StreamResultsAsync
-                                // And normal invocations handle cleanup below in the finally
-                                if (isStreamCall)
-                                {
-                                    await CleanupInvocation(connection, hubMethodInvocationMessage, hubActivator, hub, scope);
-                                }
-                            }
-
-                            // No InvocationId - Send Async, no response expected
-                            if (!string.IsNullOrEmpty(hubMethodInvocationMessage.InvocationId))
-                            {
-                                // Invoke Async, one reponse expected
-                                await connection.WriteAsync(CompletionMessage.WithResult(hubMethodInvocationMessage.InvocationId, result));
-                            }
-                        }
-                        invocation = ExecuteInvocation();
-                    }
-
-                    if (isStreamCall || isStreamResponse)
-                    {
-                        // don't await streaming invocations
-                        // leave them running in the background, allowing dispatcher to process other messages between streaming items
-                        disposeScope = false;
-                    }
-                    else
-                    {
-                        // complete the non-streaming calls now
-                        await invocation;
-                    }
-                }
-                catch (TargetInvocationException ex)
-                {
-                    Log.FailedInvokingHubMethod(_logger, hubMethodInvocationMessage.Target, ex);
-                    await SendInvocationError(hubMethodInvocationMessage.InvocationId, connection,
-                        ErrorMessageHelper.BuildErrorMessage($"An unexpected error occurred invoking '{hubMethodInvocationMessage.Target}' on the server.", ex.InnerException, _enableDetailedErrors));
-                }
-                catch (Exception ex)
-                {
-                    Log.FailedInvokingHubMethod(_logger, hubMethodInvocationMessage.Target, ex);
-                    await SendInvocationError(hubMethodInvocationMessage.InvocationId, connection,
-                        ErrorMessageHelper.BuildErrorMessage($"An unexpected error occurred invoking '{hubMethodInvocationMessage.Target}' on the server.", ex, _enableDetailedErrors));
-                }
-            }
-            finally
-            {
-                if (disposeScope)
-                {
-                    await CleanupInvocation(connection, hubMethodInvocationMessage, hubActivator, hub, scope);
-                }
-            }
-        }
-
-        private ValueTask CleanupInvocation(HubConnectionContext connection, HubMethodInvocationMessage hubMessage, IHubActivator<THub> hubActivator,
-            THub hub, IServiceScope scope)
-        {
-            if (hubMessage.StreamIds != null)
-            {
-                foreach (var stream in hubMessage.StreamIds)
-                {
-                    connection.StreamTracker.TryComplete(CompletionMessage.Empty(stream));
-                }
-            }
-
-            hubActivator?.Release(hub);
-
-            return scope.DisposeAsync();
-        }
-
-        private async Task StreamResultsAsync(string invocationId, HubConnectionContext connection, IAsyncEnumerable<object> enumerable, IServiceScope scope,
-            IHubActivator<THub> hubActivator, THub hub, CancellationTokenSource streamCts, HubMethodInvocationMessage hubMethodInvocationMessage)
-        {
-            string error = null;
-
-            try
-            {
-                await foreach (var streamItem in enumerable)
-                {
-                    // Send the stream item
-                    await connection.WriteAsync(new StreamItemMessage(invocationId, streamItem));
-                }
-            }
-            catch (ChannelClosedException ex)
-            {
-                // If the channel closes from an exception in the streaming method, grab the innerException for the error from the streaming method
-                error = ErrorMessageHelper.BuildErrorMessage("An error occurred on the server while streaming results.", ex.InnerException ?? ex, _enableDetailedErrors);
-            }
-            catch (Exception ex)
-            {
-                // If the streaming method was canceled we don't want to send a HubException message - this is not an error case
-                if (!(ex is OperationCanceledException && connection.ActiveRequestCancellationSources.TryGetValue(invocationId, out var cts)
-                    && cts.IsCancellationRequested))
-                {
-                    error = ErrorMessageHelper.BuildErrorMessage("An error occurred on the server while streaming results.", ex, _enableDetailedErrors);
-                }
-            }
-            finally
-            {
-                await CleanupInvocation(connection, hubMethodInvocationMessage, hubActivator, hub, scope);
-
-                // Dispose the linked CTS for the stream.
-                streamCts.Dispose();
-
-                await connection.WriteAsync(CompletionMessage.WithError(invocationId, error));
-
-                if (connection.ActiveRequestCancellationSources.TryRemove(invocationId, out var cts))
-                {
-                    cts.Dispose();
-                }
-            }
-        }
-
-        private ValueTask<object> ExecuteHubMethod(ObjectMethodExecutor methodExecutor, THub hub, object[] arguments, HubConnectionContext connection, IServiceProvider serviceProvider)
-        {
-            if (_invokeMiddleware != null)
-            {
-                var invocationContext = new HubInvocationContext(methodExecutor, connection.HubCallerContext, serviceProvider, hub, arguments);
-                return _invokeMiddleware(invocationContext);
-            }
-
-            // If no Hub filters are registered
-            return ExecuteMethod(methodExecutor, hub, arguments);
-        }
-
-        private ValueTask<object> ExecuteMethod(string hubMethodName, Hub hub, object[] arguments)
-        {
-            if (!_methods.TryGetValue(hubMethodName, out var methodDescriptor))
-            {
-                throw new HubException($"Unknown hub method '{hubMethodName}'");
-            }
-            var methodExecutor = methodDescriptor.MethodExecutor;
-            return ExecuteMethod(methodExecutor, hub, arguments);
-        }
-
-        private async ValueTask<object> ExecuteMethod(ObjectMethodExecutor methodExecutor, Hub hub, object[] arguments)
-        {
-            if (methodExecutor.IsMethodAsync)
-            {
-                if (methodExecutor.MethodReturnType == typeof(Task))
-                {
-                    await (Task)methodExecutor.Execute(hub, arguments);
-                    return null;
-                }
-                else
-                {
-                    return await methodExecutor.ExecuteAsync(hub, arguments);
-                }
+                    var (dispatcher, descriptor, connection, invocationMessage) = state;
+                    return dispatcher.Invoke(descriptor, connection, invocationMessage, isStreamResponse: false, isStreamCall: false);
+                }, (this, descriptor, connection, hubMethodInvocationMessage)).AsTask();
             }
             else
             {
-                return methodExecutor.Execute(hub, arguments);
+                return Invoke(descriptor, connection, hubMethodInvocationMessage, isStreamResponse, isStreamCall);
+            }
+        }
+    }
+
+    private async Task<bool> Invoke(HubMethodDescriptor descriptor, HubConnectionContext connection,
+        HubMethodInvocationMessage hubMethodInvocationMessage, bool isStreamResponse, bool isStreamCall)
+    {
+        var methodExecutor = descriptor.MethodExecutor;
+
+        var wasSemaphoreReleased = false;
+        var disposeScope = true;
+        var scope = _serviceScopeFactory.CreateAsyncScope();
+        IHubActivator<THub>? hubActivator = null;
+        THub? hub = null;
+        long? streamOwner = null;
+        try
+        {
+            hubActivator = scope.ServiceProvider.GetRequiredService<IHubActivator<THub>>();
+            hub = hubActivator.Create();
+            var hubCallerContext = connection.HubCallerContext;
+
+            if (!await IsHubMethodAuthorized(scope.ServiceProvider, hubCallerContext, descriptor, hubMethodInvocationMessage.Arguments, hub))
+            {
+                Log.HubMethodNotAuthorized(_logger, hubMethodInvocationMessage.Target);
+                await SendInvocationError(hubMethodInvocationMessage.InvocationId, connection,
+                    $"Failed to invoke '{hubMethodInvocationMessage.Target}' because user is unauthorized");
+                return true;
+            }
+
+            if (!await ValidateInvocationMode(descriptor, isStreamResponse, hubMethodInvocationMessage, connection))
+            {
+                return true;
+            }
+
+            try
+            {
+                var clientStreamLength = hubMethodInvocationMessage.StreamIds?.Length ?? 0;
+                var serverStreamLength = descriptor.StreamingParameters?.Count ?? 0;
+                if (clientStreamLength != serverStreamLength)
+                {
+                    var ex = new HubException($"Client sent {clientStreamLength} stream(s), Hub method expects {serverStreamLength}.");
+                    Log.InvalidHubParameters(_logger, hubMethodInvocationMessage.Target, ex);
+                    await SendInvocationError(hubMethodInvocationMessage.InvocationId, connection,
+                        ErrorMessageHelper.BuildErrorMessage($"An unexpected error occurred invoking '{hubMethodInvocationMessage.Target}' on the server.", ex, _enableDetailedErrors));
+                    return true;
+                }
+
+                InitializeHub(hub, connection, hubCallerContext);
+                Task? invocation = null;
+
+                var arguments = hubMethodInvocationMessage.Arguments;
+                CancellationTokenSource? cts = null;
+                if (descriptor.HasSyntheticArguments)
+                {
+                    ReplaceArguments(descriptor, hubMethodInvocationMessage, isStreamCall, connection, scope, ref arguments, ref streamOwner, out cts);
+                }
+
+                if (isStreamCall || isStreamResponse)
+                {
+                    Debug.Assert(hub.Clients is HubCallerClients);
+                    // Streaming invocations aren't involved with the semaphore.
+                    // Setting the semaphore released flag avoids potential client result calls from the streaming hub method
+                    // releasing the semaphore which would cause a SemaphoreFullException.
+                    ((HubCallerClients)hub.Clients).TrySetSemaphoreReleased();
+                }
+
+                if (isStreamResponse)
+                {
+                    _ = StreamAsync(hubMethodInvocationMessage.InvocationId!, connection, hubCallerContext,
+                        arguments, scope, hubActivator, hub, cts, hubMethodInvocationMessage, descriptor, streamOwner);
+                }
+                else
+                {
+                    // Invoke or Send
+                    static async Task ExecuteInvocation(DefaultHubDispatcher<THub> dispatcher,
+                                                        ObjectMethodExecutor methodExecutor,
+                                                        HubMethodDescriptor descriptor,
+                                                        THub hub,
+                                                        object?[] arguments,
+                                                        AsyncServiceScope scope,
+                                                        IHubActivator<THub> hubActivator,
+                                                        HubConnectionContext connection,
+                                                        HubCallerContext hubCallerContext,
+                                                        HubMethodInvocationMessage hubMethodInvocationMessage,
+                                                        bool isStreamCall,
+                                                        CancellationTokenSource? cts,
+                                                        long? streamOwner)
+                    {
+                        var logger = dispatcher._logger;
+                        var enableDetailedErrors = dispatcher._enableDetailedErrors;
+
+                        // Hub invocation gets its parent from a remote source. Clear any current activity and restore it later.
+                        var previousActivity = Activity.Current;
+                        if (previousActivity != null)
+                        {
+                            Activity.Current = null;
+                        }
+
+                        // Use hubMethodInvocationMessage.Target instead of methodExecutor.MethodInfo.Name
+                        // We want to take HubMethodNameAttribute into account which will be the same as what the invocation target is
+                        var activity = StartActivity(SignalRServerActivitySource.InvocationIn, ActivityKind.Server, connection.OriginalActivityLinks, scope.ServiceProvider, hubMethodInvocationMessage.Target, hubMethodInvocationMessage.Headers, logger, connection, descriptor);
+
+                        // Register the CancellationTokenSource if present so CancelInvocationMessage can cancel it
+                        var ctsRegistered = false;
+                        if (cts != null && !string.IsNullOrEmpty(hubMethodInvocationMessage.InvocationId))
+                        {
+                            if (!connection.ActiveRequestCancellationSources.TryAdd(hubMethodInvocationMessage.InvocationId!, cts))
+                            {
+                                Log.InvocationIdInUse(logger, hubMethodInvocationMessage.InvocationId);
+                                await SendInvocationError(hubMethodInvocationMessage.InvocationId, connection,
+                                    $"Invocation ID '{hubMethodInvocationMessage.InvocationId}' is already in use.");
+                                cts.Dispose();
+                                return;
+                            }
+                            ctsRegistered = true;
+                        }
+
+                        object? result;
+                        try
+                        {
+                            result = await dispatcher.ExecuteHubMethod(
+                                methodExecutor, hub, arguments, hubCallerContext, scope.ServiceProvider);
+                            Log.SendingResult(logger, hubMethodInvocationMessage.InvocationId, methodExecutor);
+                        }
+                        catch (Exception ex)
+                        {
+                            SetActivityError(activity, ex);
+
+                            Log.FailedInvokingHubMethod(logger, hubMethodInvocationMessage.Target, ex);
+                            await SendInvocationError(hubMethodInvocationMessage.InvocationId, connection,
+                                ErrorMessageHelper.BuildErrorMessage($"An unexpected error occurred invoking '{hubMethodInvocationMessage.Target}' on the server.", ex, enableDetailedErrors));
+                            return;
+                        }
+                        finally
+                        {
+                            activity?.Stop();
+
+                            if (Activity.Current != previousActivity)
+                            {
+                                Activity.Current = previousActivity;
+                            }
+
+                            // Remove the CancellationTokenSource from active requests. Only do this if we
+                            // successfully registered it, otherwise we'd evict another invocation's CTS on ID collision.
+                            if (ctsRegistered)
+                            {
+                                connection.ActiveRequestCancellationSources.TryRemove(hubMethodInvocationMessage.InvocationId!, out _);
+                            }
+                            // Always dispose the CTS if one was created (covers SendAsync with a CancellationToken
+                            // synthetic arg, which has no InvocationId and was therefore not added to the dictionary).
+                            cts?.Dispose();
+
+                            // Stream response handles cleanup in StreamResultsAsync
+                            // And normal invocations handle cleanup below in the finally
+                            if (isStreamCall)
+                            {
+                                await CleanupInvocation(connection, hubMethodInvocationMessage, streamOwner, hubActivator, hub, scope);
+                            }
+                        }
+
+                        // No InvocationId - Send Async, no response expected
+                        if (!string.IsNullOrEmpty(hubMethodInvocationMessage.InvocationId))
+                        {
+                            // Invoke Async, one response expected
+                            await connection.WriteAsync(CompletionMessage.WithResult(hubMethodInvocationMessage.InvocationId, result));
+                        }
+                    }
+
+                    invocation = ExecuteInvocation(this, methodExecutor, descriptor, hub, arguments, scope, hubActivator, connection, hubCallerContext, hubMethodInvocationMessage, isStreamCall, cts, streamOwner);
+                }
+
+                if (isStreamCall || isStreamResponse)
+                {
+                    // don't await streaming invocations
+                    // leave them running in the background, allowing dispatcher to process other messages between streaming items
+                    disposeScope = false;
+                }
+                else
+                {
+                    // complete the non-streaming calls now
+                    await invocation!;
+                }
+            }
+            catch (TargetInvocationException ex)
+            {
+                Log.FailedInvokingHubMethod(_logger, hubMethodInvocationMessage.Target, ex);
+                await SendInvocationError(hubMethodInvocationMessage.InvocationId, connection,
+                    ErrorMessageHelper.BuildErrorMessage($"An unexpected error occurred invoking '{hubMethodInvocationMessage.Target}' on the server.", ex.InnerException ?? ex, _enableDetailedErrors));
+            }
+            catch (Exception ex)
+            {
+                Log.FailedInvokingHubMethod(_logger, hubMethodInvocationMessage.Target, ex);
+                await SendInvocationError(hubMethodInvocationMessage.InvocationId, connection,
+                    ErrorMessageHelper.BuildErrorMessage($"An unexpected error occurred invoking '{hubMethodInvocationMessage.Target}' on the server.", ex, _enableDetailedErrors));
+            }
+        }
+        finally
+        {
+            if (disposeScope)
+            {
+                if (hub?.Clients is HubCallerClients hubCallerClients)
+                {
+                    wasSemaphoreReleased = !hubCallerClients.TrySetSemaphoreReleased();
+                }
+                await CleanupInvocation(connection, hubMethodInvocationMessage, streamOwner, hubActivator, hub, scope);
             }
         }
 
-        private async Task SendInvocationError(string invocationId,
-            HubConnectionContext connection, string errorMessage)
+        return !wasSemaphoreReleased;
+    }
+
+    private static ValueTask CleanupInvocation(HubConnectionContext connection, HubMethodInvocationMessage hubMessage, long? streamOwner, IHubActivator<THub>? hubActivator,
+        THub? hub, AsyncServiceScope scope)
+    {
+        if (streamOwner is not null)
         {
-            if (string.IsNullOrEmpty(invocationId))
+            foreach (var streamId in hubMessage.StreamIds!)
             {
+                connection.StreamTracker.TryComplete(streamId, streamOwner.Value);
+            }
+        }
+
+        if (hub != null)
+        {
+            hubActivator?.Release(hub);
+        }
+
+        return scope.DisposeAsync();
+    }
+
+    private async Task StreamAsync(string invocationId, HubConnectionContext connection, HubCallerContext hubCallerContext, object?[] arguments, AsyncServiceScope scope,
+        IHubActivator<THub> hubActivator, THub hub, CancellationTokenSource? streamCts, HubMethodInvocationMessage hubMethodInvocationMessage,
+        HubMethodDescriptor descriptor, long? streamOwner)
+    {
+        string? error = null;
+
+        streamCts ??= CancellationTokenSource.CreateLinkedTokenSource(connection.ConnectionAborted);
+
+        // Hub invocation gets its parent from a remote source. Clear any current activity and restore it later.
+        var previousActivity = Activity.Current;
+        if (previousActivity != null)
+        {
+            Activity.Current = null;
+        }
+
+        var activity = StartActivity(SignalRServerActivitySource.InvocationIn, ActivityKind.Server, connection.OriginalActivityLinks, scope.ServiceProvider, hubMethodInvocationMessage.Target, hubMethodInvocationMessage.Headers, _logger, connection, descriptor);
+
+        var ctsRegistered = false;
+        try
+        {
+            if (!connection.ActiveRequestCancellationSources.TryAdd(invocationId, streamCts))
+            {
+                Log.InvocationIdInUse(_logger, invocationId);
+                error = $"Invocation ID '{invocationId}' is already in use.";
+                streamCts.Dispose();
+                return;
+            }
+            ctsRegistered = true;
+
+            object? result;
+            try
+            {
+                result = await ExecuteHubMethod(descriptor.MethodExecutor, hub, arguments, hubCallerContext, scope.ServiceProvider);
+            }
+            catch (Exception ex)
+            {
+                SetActivityError(activity, ex);
+
+                Log.FailedInvokingHubMethod(_logger, hubMethodInvocationMessage.Target, ex);
+                error = ErrorMessageHelper.BuildErrorMessage($"An unexpected error occurred invoking '{hubMethodInvocationMessage.Target}' on the server.", ex, _enableDetailedErrors);
                 return;
             }
 
-            await connection.WriteAsync(CompletionMessage.WithError(invocationId, errorMessage));
-        }
-
-        private void InitializeHub(THub hub, HubConnectionContext connection)
-        {
-            hub.Clients = new HubCallerClients(_hubContext.Clients, connection.ConnectionId);
-            hub.Context = connection.HubCallerContext;
-            hub.Groups = _hubContext.Groups;
-        }
-
-        private Task<bool> IsHubMethodAuthorized(IServiceProvider provider, HubConnectionContext hubConnectionContext, HubMethodDescriptor descriptor, object[] hubMethodArguments, Hub hub)
-        {
-            // If there are no policies we don't need to run auth
-            if (descriptor.Policies.Count == 0)
+            if (result == null)
             {
-                return TaskCache.True;
+                Log.InvalidReturnValueFromStreamingMethod(_logger, descriptor.MethodExecutor.MethodInfo.Name);
+                error = $"The value returned by the streaming method '{descriptor.MethodExecutor.MethodInfo.Name}' is not a ChannelReader<> or IAsyncEnumerable<>.";
+                return;
             }
 
-            return IsHubMethodAuthorizedSlow(provider, hubConnectionContext.User, descriptor.Policies, new HubInvocationContext(hubConnectionContext.HubCallerContext, provider, hub, descriptor.MethodExecutor.MethodInfo, hubMethodArguments));
-        }
+            await using var enumerator = descriptor.FromReturnedStream(result, streamCts.Token);
+            Log.StreamingResult(_logger, invocationId, descriptor.MethodExecutor);
+            var streamItemMessage = new StreamItemMessage(invocationId, null);
 
-        private static async Task<bool> IsHubMethodAuthorizedSlow(IServiceProvider provider, ClaimsPrincipal principal, IList<IAuthorizeData> policies, HubInvocationContext resource)
-        {
-            var authService = provider.GetRequiredService<IAuthorizationService>();
-            var policyProvider = provider.GetRequiredService<IAuthorizationPolicyProvider>();
-
-            var authorizePolicy = await AuthorizationPolicy.CombineAsync(policyProvider, policies);
-            // AuthorizationPolicy.CombineAsync only returns null if there are no policies and we check that above
-            Debug.Assert(authorizePolicy != null);
-
-            var authorizationResult = await authService.AuthorizeAsync(principal, resource, authorizePolicy);
-            // Only check authorization success, challenge or forbid wouldn't make sense from a hub method invocation
-            return authorizationResult.Succeeded;
-        }
-
-        private async Task<bool> ValidateInvocationMode(HubMethodDescriptor hubMethodDescriptor, bool isStreamResponse,
-            HubMethodInvocationMessage hubMethodInvocationMessage, HubConnectionContext connection)
-        {
-            if (hubMethodDescriptor.IsStreamResponse && !isStreamResponse)
+            while (await enumerator.MoveNextAsync())
             {
-                // Non-null/empty InvocationId? Blocking
-                if (!string.IsNullOrEmpty(hubMethodInvocationMessage.InvocationId))
-                {
-                    Log.StreamingMethodCalledWithInvoke(_logger, hubMethodInvocationMessage);
-                    await connection.WriteAsync(CompletionMessage.WithError(hubMethodInvocationMessage.InvocationId,
-                        $"The client attempted to invoke the streaming '{hubMethodInvocationMessage.Target}' method with a non-streaming invocation."));
-                }
+                streamItemMessage.Item = enumerator.Current;
+                // Send the stream item
+                await connection.WriteAsync(streamItemMessage);
+            }
+        }
+        catch (ChannelClosedException ex)
+        {
+            // If the channel closes from an exception in the streaming method, grab the innerException for the error from the streaming method
+            var exception = ex.InnerException ?? ex;
+            SetActivityError(activity, exception);
 
-                return false;
+            Log.FailedStreaming(_logger, invocationId, descriptor.MethodExecutor.MethodInfo.Name, exception);
+            error = ErrorMessageHelper.BuildErrorMessage("An error occurred on the server while streaming results.", exception, _enableDetailedErrors);
+        }
+        catch (Exception ex)
+        {
+            // If the streaming method was canceled we don't want to send a HubException message - this is not an error case
+            if (!(ex is OperationCanceledException && streamCts.IsCancellationRequested))
+            {
+                SetActivityError(activity, ex);
+
+                Log.FailedStreaming(_logger, invocationId, descriptor.MethodExecutor.MethodInfo.Name, ex);
+                error = ErrorMessageHelper.BuildErrorMessage("An error occurred on the server while streaming results.", ex, _enableDetailedErrors);
+            }
+        }
+        finally
+        {
+            activity?.Stop();
+
+            if (Activity.Current != previousActivity)
+            {
+                Activity.Current = previousActivity;
             }
 
-            if (!hubMethodDescriptor.IsStreamResponse && isStreamResponse)
-            {
-                Log.NonStreamingMethodCalledWithStream(_logger, hubMethodInvocationMessage);
-                await connection.WriteAsync(CompletionMessage.WithError(hubMethodInvocationMessage.InvocationId,
-                    $"The client attempted to invoke the non-streaming '{hubMethodInvocationMessage.Target}' method with a streaming invocation."));
+            await CleanupInvocation(connection, hubMethodInvocationMessage, streamOwner, hubActivator, hub, scope);
 
-                return false;
+            // Only remove/dispose the CTS if we successfully registered it, otherwise we'd evict
+            // another invocation's CTS on ID collision.
+            if (ctsRegistered)
+            {
+                connection.ActiveRequestCancellationSources.TryRemove(invocationId, out _);
+                streamCts.Dispose();
             }
 
+            await connection.WriteAsync(CompletionMessage.WithError(invocationId, error));
+        }
+    }
+
+    private ValueTask<object?> ExecuteHubMethod(ObjectMethodExecutor methodExecutor, THub hub, object?[] arguments, HubCallerContext hubCallerContext, IServiceProvider serviceProvider)
+    {
+        if (_invokeMiddleware != null)
+        {
+            var invocationContext = new HubInvocationContext(methodExecutor, hubCallerContext, serviceProvider, hub, arguments);
+            return _invokeMiddleware(invocationContext);
+        }
+
+        // If no Hub filters are registered
+        return ExecuteMethod(methodExecutor, hub, arguments);
+    }
+
+    private ValueTask<object?> ExecuteMethod(string hubMethodName, Hub hub, object?[] arguments)
+    {
+        if (!_methods.TryGetValue(hubMethodName, out var methodDescriptor))
+        {
+            throw new HubException($"Unknown hub method '{hubMethodName}'");
+        }
+        var methodExecutor = methodDescriptor.MethodExecutor;
+        return ExecuteMethod(methodExecutor, hub, arguments);
+    }
+
+    private static async ValueTask<object?> ExecuteMethod(ObjectMethodExecutor methodExecutor, Hub hub, object?[] arguments)
+    {
+        if (methodExecutor.IsMethodAsync)
+        {
+            if (methodExecutor.MethodReturnType == typeof(Task))
+            {
+                await (Task)methodExecutor.Execute(hub, arguments)!;
+                return null;
+            }
+            else
+            {
+                return await methodExecutor.ExecuteAsync(hub, arguments);
+            }
+        }
+        else
+        {
+            return methodExecutor.Execute(hub, arguments);
+        }
+    }
+
+    private static async Task SendInvocationError(string? invocationId, HubConnectionContext connection, string errorMessage)
+    {
+        if (string.IsNullOrEmpty(invocationId))
+        {
+            return;
+        }
+
+        await connection.WriteAsync(CompletionMessage.WithError(invocationId, errorMessage));
+    }
+
+    private void InitializeHub(
+        THub hub,
+        HubConnectionContext connection,
+        HubCallerContext hubCallerContext,
+        bool invokeAllowed = true)
+    {
+        hub.Clients = new HubCallerClients(_hubContext.Clients, connection.ConnectionId, connection.ActiveInvocationLimit)
+        {
+            InvokeAllowed = invokeAllowed
+        };
+        hub.Context = hubCallerContext;
+        hub.Groups = _hubContext.Groups;
+    }
+
+    private static Task<bool> IsHubMethodAuthorized(
+        IServiceProvider provider,
+        HubCallerContext hubCallerContext,
+        HubMethodDescriptor descriptor,
+        object?[] hubMethodArguments,
+        Hub hub)
+    {
+        // If there is no authorization metadata we don't need to run auth
+        if (descriptor.AuthorizationMetadata.Count == 0)
+        {
+            return TaskCache.True;
+        }
+
+        return IsHubMethodAuthorizedSlow(
+            provider,
+            hubCallerContext.User ?? new ClaimsPrincipal(),
+            descriptor,
+            new HubInvocationContext(hubCallerContext, provider, hub, descriptor.MethodExecutor.MethodInfo, hubMethodArguments));
+    }
+
+    private static async Task<bool> IsHubMethodAuthorizedSlow(IServiceProvider provider, ClaimsPrincipal principal, HubMethodDescriptor descriptor, HubInvocationContext resource)
+    {
+        var policyProvider = provider.GetRequiredService<IAuthorizationPolicyProvider>();
+
+        var authorizePolicy = await descriptor.GetAuthorizationPolicyAsync(policyProvider);
+        if (authorizePolicy is null)
+        {
+            // The method had attributes, but none of them contributed authorization metadata
             return true;
         }
 
-        private void DiscoverHubMethods()
+        var authService = provider.GetRequiredService<IAuthorizationService>();
+        var authorizationResult = await authService.AuthorizeAsync(principal, resource, authorizePolicy);
+        // Only check authorization success, challenge or forbid wouldn't make sense from a hub method invocation
+        return authorizationResult.Succeeded;
+    }
+
+    private static void EnsureNoAuthenticationSchemeSpecified(IReadOnlyList<object> authorizationMetadata)
+    {
+        // It's not meaningful to specify a nonempty scheme, since by the time hub method
+        // authorization runs, the connection already has a specific ClaimsPrincipal (we're stateful).
+        // To avoid any confusion, ensure the developer isn't trying to specify a scheme.
+        for (var i = 0; i < authorizationMetadata.Count; i++)
         {
-            var hubType = typeof(THub);
-            var hubTypeInfo = hubType.GetTypeInfo();
-            var hubName = hubType.Name;
-
-            foreach (var methodInfo in HubReflectionHelper.GetHubMethods(hubType))
+            if (authorizationMetadata[i] is IAuthorizeData entry && !string.IsNullOrEmpty(entry.AuthenticationSchemes))
             {
-                if (methodInfo.IsGenericMethod)
-                {
-                    throw new NotSupportedException($"Method '{methodInfo.Name}' is a generic method which is not supported on a Hub.");
-                }
-
-                var methodName =
-                    methodInfo.GetCustomAttribute<HubMethodNameAttribute>()?.Name ??
-                    methodInfo.Name;
-
-                if (_methods.ContainsKey(methodName))
-                {
-                    throw new NotSupportedException($"Duplicate definitions of '{methodName}'. Overloading is not supported.");
-                }
-
-                var executor = ObjectMethodExecutor.Create(methodInfo, hubTypeInfo);
-                var authorizeAttributes = methodInfo.GetCustomAttributes<AuthorizeAttribute>(inherit: true);
-                _methods[methodName] = new HubMethodDescriptor(executor, authorizeAttributes);
-
-                Log.HubMethodBound(_logger, hubName, methodName);
+                throw new NotSupportedException($"The authorization data specifies an authentication scheme with value '{entry.AuthenticationSchemes}'. Authentication schemes cannot be specified for hub methods.");
             }
         }
+    }
 
-        public override IReadOnlyList<Type> GetParameterTypes(string methodName)
+    private async Task<bool> ValidateInvocationMode(HubMethodDescriptor hubMethodDescriptor, bool isStreamResponse,
+        HubMethodInvocationMessage hubMethodInvocationMessage, HubConnectionContext connection)
+    {
+        if (hubMethodDescriptor.IsStreamResponse && !isStreamResponse)
         {
-            if (!_methods.TryGetValue(methodName, out var descriptor))
+            // Non-null/empty InvocationId? Blocking
+            if (!string.IsNullOrEmpty(hubMethodInvocationMessage.InvocationId))
             {
-                throw new HubException("Method does not exist.");
+                Log.StreamingMethodCalledWithInvoke(_logger, hubMethodInvocationMessage);
+                await connection.WriteAsync(CompletionMessage.WithError(hubMethodInvocationMessage.InvocationId,
+                    $"The client attempted to invoke the streaming '{hubMethodInvocationMessage.Target}' method with a non-streaming invocation."));
             }
-            return descriptor.ParameterTypes;
+
+            return false;
         }
+
+        if (!hubMethodDescriptor.IsStreamResponse && isStreamResponse)
+        {
+            Log.NonStreamingMethodCalledWithStream(_logger, hubMethodInvocationMessage);
+            await connection.WriteAsync(CompletionMessage.WithError(hubMethodInvocationMessage.InvocationId!,
+                $"The client attempted to invoke the non-streaming '{hubMethodInvocationMessage.Target}' method with a streaming invocation."));
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private void ReplaceArguments(HubMethodDescriptor descriptor, HubMethodInvocationMessage hubMethodInvocationMessage, bool isStreamCall,
+        HubConnectionContext connection, AsyncServiceScope scope, ref object?[] arguments,
+        ref long? streamOwner, out CancellationTokenSource? cts)
+    {
+        cts = null;
+        // In order to add the synthetic arguments we need a new array because the invocation array is too small (it doesn't know about synthetic arguments)
+        arguments = new object?[descriptor.OriginalParameterTypes!.Count];
+
+        var streamPointer = 0;
+        var hubInvocationArgumentPointer = 0;
+        var argumentsReplaced = false;
+        try
+        {
+            for (var parameterPointer = 0; parameterPointer < arguments.Length; parameterPointer++)
+            {
+                // populate the synthetic arguments first
+                if (descriptor.IsServiceArgument(parameterPointer))
+                {
+                    arguments[parameterPointer] = descriptor.GetService(scope.ServiceProvider, parameterPointer, descriptor.OriginalParameterTypes[parameterPointer]);
+                }
+                else if (descriptor.OriginalParameterTypes[parameterPointer] == typeof(CancellationToken))
+                {
+                    cts = CancellationTokenSource.CreateLinkedTokenSource(connection.ConnectionAborted);
+                    arguments[parameterPointer] = cts.Token;
+                }
+                else if (isStreamCall && ReflectionHelper.IsStreamingType(descriptor.OriginalParameterTypes[parameterPointer], mustBeDirectType: true))
+                {
+                    Log.StartingParameterStream(_logger, hubMethodInvocationMessage.StreamIds![streamPointer]);
+                    var itemType = descriptor.StreamingParameters![streamPointer];
+                    arguments[parameterPointer] = connection.StreamTracker.AddStream(hubMethodInvocationMessage.StreamIds[streamPointer],
+                        itemType, descriptor.OriginalParameterTypes[parameterPointer], streamOwner ??= connection.StreamTracker.GetNextStreamOwner());
+
+                    streamPointer++;
+                }
+                else if (hubMethodInvocationMessage.Arguments?.Length > hubInvocationArgumentPointer &&
+                    (hubMethodInvocationMessage.Arguments[hubInvocationArgumentPointer] == null ||
+                    descriptor.OriginalParameterTypes[parameterPointer].IsAssignableFrom(hubMethodInvocationMessage.Arguments[hubInvocationArgumentPointer]?.GetType())))
+                {
+                    // The types match so it isn't a synthetic argument, just copy it into the arguments array
+                    arguments[parameterPointer] = hubMethodInvocationMessage.Arguments[hubInvocationArgumentPointer];
+                    hubInvocationArgumentPointer++;
+                }
+                else
+                {
+                    // This should never happen
+                    Debug.Assert(false, $"Failed to bind argument of type '{descriptor.OriginalParameterTypes[parameterPointer].Name}' for hub method '{descriptor.MethodExecutor.MethodInfo.Name}'.");
+                }
+            }
+
+            argumentsReplaced = true;
+        }
+        finally
+        {
+            if (!argumentsReplaced)
+            {
+                cts?.Dispose();
+            }
+        }
+    }
+
+    private void DiscoverHubMethods(bool disableImplicitFromServiceParameters)
+    {
+        var hubType = typeof(THub);
+        var hubTypeInfo = hubType.GetTypeInfo();
+        var hubName = hubType.Name;
+
+        using var scope = _serviceScopeFactory.CreateScope();
+
+        IServiceProviderIsService? serviceProviderIsService = null;
+        if (!disableImplicitFromServiceParameters)
+        {
+            serviceProviderIsService = scope.ServiceProvider.GetService<IServiceProviderIsService>();
+        }
+
+        foreach (var methodInfo in HubReflectionHelper.GetHubMethods(hubType))
+        {
+            if (methodInfo.IsGenericMethod)
+            {
+                throw new NotSupportedException($"Method '{methodInfo.Name}' is a generic method which is not supported on a Hub.");
+            }
+
+            var methodName =
+                methodInfo.GetCustomAttribute<HubMethodNameAttribute>()?.Name ??
+                methodInfo.Name;
+
+            if (_methods.ContainsKey(methodName))
+            {
+                throw new NotSupportedException($"Duplicate definitions of '{methodName}'. Overloading is not supported.");
+            }
+
+            var executor = IsCustomAwaitableSupported
+                ? CreateObjectMethodExecutor(methodInfo, hubTypeInfo)
+                : ObjectMethodExecutor.CreateTrimAotCompatible(methodInfo, hubTypeInfo);
+
+            var authorizationMetadata = methodInfo.GetCustomAttributes(inherit: true);
+            EnsureNoAuthenticationSchemeSpecified(authorizationMetadata);
+            _methods[methodName] = new HubMethodDescriptor(executor, serviceProviderIsService, authorizationMetadata) { Name = methodName };
+            _cachedMethodNames.Add(methodName);
+
+            Log.HubMethodBound(_logger, hubName, methodName);
+        }
+    }
+
+    [RequiresUnreferencedCode("Using SignalR with 'Microsoft.AspNetCore.SignalR.Hub.IsCustomAwaitableSupported=true' is not trim compatible.")]
+    [RequiresDynamicCode("Using SignalR with 'Microsoft.AspNetCore.SignalR.Hub.IsCustomAwaitableSupported=true' is not native AOT compatible.")]
+    private static ObjectMethodExecutor CreateObjectMethodExecutor(MethodInfo methodInfo, TypeInfo targetType)
+       => ObjectMethodExecutor.Create(methodInfo, targetType);
+
+    public override IReadOnlyList<Type> GetParameterTypes(string methodName)
+    {
+        if (!_methods.TryGetValue(methodName, out var descriptor))
+        {
+            throw new HubException("Method does not exist.");
+        }
+        return descriptor.ParameterTypes;
+    }
+
+    public override string? GetTargetName(ReadOnlySpan<byte> targetUtf8Bytes)
+    {
+        if (_cachedMethodNames.TryGetValue(targetUtf8Bytes, out var targetName))
+        {
+            return targetName;
+        }
+
+        return null;
+    }
+
+    // Starts an Activity for a Hub method invocation and sets up all the tags and other state.
+    // Make sure to call Activity.Stop() once the Hub method completes, and consider calling SetActivityError on exception.
+    private static Activity? StartActivity(string operationName, ActivityKind kind, IEnumerable<ActivityLink>? links, IServiceProvider serviceProvider, string methodName, IDictionary<string, string>? headers, ILogger logger, HubConnectionContext? connection = null, HubMethodDescriptor? descriptor = null)
+    {
+        var activitySource = serviceProvider.GetService<SignalRServerActivitySource>()?.ActivitySource;
+        if (activitySource is null)
+        {
+            return null;
+        }
+
+        var loggingEnabled = logger.IsEnabled(LogLevel.Critical);
+        if (!activitySource.HasListeners() && !loggingEnabled)
+        {
+            return null;
+        }
+
+        // Use a reusable list for the tags rather than a TagList, which would be boxed, along with its enumerator,
+        // for every invocation. This is safe because the tags are copied into the activity when it's created. The
+        // list is taken from the thread-static field while it's in use so a reentrant call can't modify it.
+        // Don't build a TagList and copy it into the list either. There's a JIT performance issue that can cause
+        // the copy operation to be up to 10x slower with AVX, see https://github.com/dotnet/runtime/issues/133784.
+        var tags = t_activityTags ?? new List<KeyValuePair<string, object?>>(MaxActivityTags);
+        t_activityTags = null;
+
+        Activity? activity;
+        try
+        {
+            // Update MaxActivityTags when adding tags here or in ConnectionEndpointTags.
+            tags.Add(new("rpc.method", methodName));
+            tags.Add(new("rpc.system", "signalr"));
+            tags.Add(new("rpc.service", _fullHubName));
+
+            // Add connection endpoint tags if connection is available
+            if (connection is not null)
+            {
+                ConnectionEndpointTags.AddConnectionEndpointTags(ref tags, connection.Features);
+            }
+
+            if (headers != null)
+            {
+                var propagator = serviceProvider.GetService<DistributedContextPropagator>() ?? DistributedContextPropagator.Current;
+
+                activity = ActivityCreator.CreateFromRemote(
+                    activitySource,
+                    propagator,
+                    headers,
+                    static (object? carrier, string fieldName, out string? fieldValue, out IEnumerable<string>? fieldValues) =>
+                    {
+                        fieldValues = default;
+                        var headers = (IDictionary<string, string>)carrier!;
+                        headers.TryGetValue(fieldName, out fieldValue);
+                    },
+                    operationName,
+                    kind,
+                    tags,
+                    links,
+                    loggingEnabled);
+            }
+            else
+            {
+                activity = activitySource.CreateActivity(operationName, kind, parentId: null, tags: tags, links: links);
+            }
+        }
+        finally
+        {
+            tags.Clear();
+            t_activityTags = tags;
+        }
+
+        if (activity is not null)
+        {
+            activity.DisplayName = descriptor?.GetActivityDisplayName(_fullHubName) ?? $"{_fullHubName}/{methodName}";
+            activity.Start();
+        }
+
+        return activity;
+    }
+
+    private static void SetActivityError(Activity? activity, Exception ex)
+    {
+        activity?.SetTag("error.type", ex.GetType().FullName);
+        activity?.SetStatus(ActivityStatusCode.Error);
     }
 }

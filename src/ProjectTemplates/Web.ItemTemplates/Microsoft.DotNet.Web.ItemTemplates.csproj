@@ -2,7 +2,10 @@
 
   <PropertyGroup>
     <TargetFramework>$(DefaultNetCoreTargetFramework)</TargetFramework>
+    <PackageId>Microsoft.DotNet.Web.ItemTemplates</PackageId>
+    <IsShippingPackage>false</IsShippingPackage>
     <Description>Web File Templates for Microsoft Template Engine.</Description>
+    <UsingToolTemplateLocalizer>true</UsingToolTemplateLocalizer>
   </PropertyGroup>
 
 </Project>

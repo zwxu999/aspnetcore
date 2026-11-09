@@ -22,11 +22,36 @@ inline HMODULE g_hModule;
 inline SRWLOCK g_logFileLock;
 inline HANDLE g_stdOutHandle = INVALID_HANDLE_VALUE;
 
+std::wstring GetDateTime()
+{
+    std::chrono::milliseconds milliseconds =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch());
+    std::chrono::seconds seconds = std::chrono::duration_cast<std::chrono::seconds>(milliseconds);
+    milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(milliseconds - seconds);
+
+    time_t t = seconds.count();
+    tm time;
+    // convert time to utc
+    gmtime_s(&time, &t);
+
+    constexpr auto size = sizeof("2019-11-23T13:23:02.000Z");
+    wchar_t timeString[size];
+
+    // format string to ISO8601 with additional space for 3 digits of millisecond precision
+    std::wcsftime(timeString, size, L"%FT%T.000Z", &time);
+
+    // add millisecond part
+    // 5 = 3 digits of millisecond precision + 'Z' + null character ending
+    swprintf(timeString + size - 5, 5, L"%03dZ", (int)milliseconds.count());
+
+    return std::wstring(timeString);
+}
+
 HRESULT
 PrintDebugHeader()
 {
     // Major, minor are stored in dwFileVersionMS field and patch, build in dwFileVersionLS field as pair of 32 bit numbers
-    LOG_INFOF(L"Initializing logs for '%ls'. %ls. %ls.",
+    LOG_INFOF(L"Initializing logs for '%ls'. %ls %ls.",
         GetModuleName().c_str(),
         GetProcessIdString().c_str(),
         GetVersionInfoString().c_str()
@@ -48,7 +73,7 @@ GetVersionInfoString()
     {
         DWORD  verHandle = 0;
         UINT   size = 0;
-        LPVOID lpBuffer = NULL;
+        LPVOID lpBuffer = nullptr;
 
         auto path = GetModuleName();
 
@@ -67,7 +92,7 @@ GetVersionInfoString()
             RETURN_IF_FAILED(E_FAIL);
         }
 
-        LPVOID pvProductName = NULL;
+        LPVOID pvProductName = nullptr;
         unsigned int iProductNameLen = 0;
         RETURN_LAST_ERROR_IF(!VerQueryValue(verData.data(), _T("\\StringFileInfo\\040904b0\\FileDescription"), &pvProductName, &iProductNameLen));
 
@@ -89,7 +114,7 @@ std::wstring
 GetModuleName()
 {
     WCHAR path[MAX_PATH];
-    LOG_LAST_ERROR_IF(!GetModuleFileName(g_hModule, path, sizeof(path)));
+    LOG_LAST_ERROR_IF(!GetModuleFileName(g_hModule, path, _countof(path)));
     return path;
 }
 
@@ -186,14 +211,14 @@ DebugInitialize(HMODULE hModule)
             KEY_READ,
             &hKey) == NO_ERROR)
     {
-        DWORD dwType;
-        DWORD dwData;
-        DWORD cbData;
+        DWORD dwType{0};
+        DWORD dwData{0};
+        DWORD cbData{0};
 
         cbData = sizeof(dwData);
         if ((RegQueryValueEx(hKey,
             L"DebugFlags",
-            NULL,
+            nullptr,
             &dwType,
             (LPBYTE)&dwData,
             &cbData) == NO_ERROR) &&
@@ -320,9 +345,10 @@ DebugPrintW(
 
     if ( IsEnabled( dwFlag ) )
     {
+        auto time = GetDateTime();
         hr = strOutput.SafeSnwprintf(
-            L"[%S] %s\r\n",
-            DEBUG_LABEL_VAR, szString );
+            L"[%s, PID: %u] [%S] %s\r\n",
+            time.c_str(), GetCurrentProcessId(), DEBUG_LABEL_VAR, szString );
 
         if (FAILED (hr))
         {
@@ -331,26 +357,23 @@ DebugPrintW(
 
         OutputDebugString( strOutput.QueryStr() );
 
-        if (IsEnabled(ASPNETCORE_DEBUG_FLAG_CONSOLE) || g_logFile != INVALID_HANDLE_VALUE)
+        if (IsEnabled(ASPNETCORE_DEBUG_FLAG_CONSOLE))
         {
-            if (IsEnabled(ASPNETCORE_DEBUG_FLAG_CONSOLE))
-            {
-                WriteFileEncoded(GetConsoleOutputCP(), g_stdOutHandle, strOutput.QueryStr());
-            }
+            WriteFileEncoded(GetConsoleOutputCP(), g_stdOutHandle, strOutput.QueryStr());
+        }
 
-            if (g_logFile != INVALID_HANDLE_VALUE)
-            {
-                SRWExclusiveLock lock(g_logFileLock);
+        if (g_logFile != INVALID_HANDLE_VALUE)
+        {
+            SRWExclusiveLock lock(g_logFileLock);
 
-                SetFilePointer(g_logFile, 0, nullptr, FILE_END);
-                WriteFileEncoded(CP_UTF8, g_logFile, strOutput.QueryStr());
-                FlushFileBuffers(g_logFile);
-            }
+            SetFilePointer(g_logFile, 0, nullptr, FILE_END);
+            WriteFileEncoded(CP_UTF8, g_logFile, strOutput.QueryStr());
+            FlushFileBuffers(g_logFile);
         }
 
         if (IsEnabled(ASPNETCORE_DEBUG_FLAG_EVENTLOG))
         {
-            WORD eventType;
+            WORD eventType = EVENTLOG_INFORMATION_TYPE;
             switch (dwFlag)
             {
                 case ASPNETCORE_DEBUG_FLAG_ERROR:
@@ -386,7 +409,10 @@ DebugPrintfW(
 
         hr = strCooked.SafeVsnwprintf(szFormat, args );
 
+#pragma warning(push)
+#pragma warning(disable: 26477) // va_end uses 0
         va_end( args );
+#pragma warning(pop)
 
         if (FAILED (hr))
         {
@@ -430,7 +456,10 @@ DebugPrintf(
 
         hr = strCooked.SafeVsnprintf(szFormat, args );
 
+#pragma warning(push)
+#pragma warning(disable: 26477) // va_end uses 0
         va_end( args );
+#pragma warning(pop)
 
         if (FAILED (hr))
         {

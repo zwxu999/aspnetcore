@@ -1,53 +1,48 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.Extensions.DependencyInjection;
 
-namespace Microsoft.AspNetCore.Mvc
+namespace Microsoft.AspNetCore.Mvc;
+
+/// <summary>
+/// Executes a middleware pipeline provided the by the <see cref="MiddlewareFilterAttribute.ConfigurationType"/>.
+/// The middleware pipeline will be treated as an async resource filter.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = true, Inherited = true)]
+public class MiddlewareFilterAttribute : Attribute, IFilterFactory, IOrderedFilter
 {
     /// <summary>
-    /// Executes a middleware pipeline provided the by the <see cref="MiddlewareFilterAttribute.ConfigurationType"/>.
-    /// The middleware pipeline will be treated as an async resource filter.
+    /// Instantiates a new instance of <see cref="MiddlewareFilterAttribute"/>.
     /// </summary>
-    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = true, Inherited = true)]
-    public class MiddlewareFilterAttribute : Attribute, IFilterFactory, IOrderedFilter
+    /// <param name="configurationType">A type which configures a middleware pipeline.</param>
+    public MiddlewareFilterAttribute(Type configurationType)
     {
-        /// <summary>
-        /// Instantiates a new instance of <see cref="MiddlewareFilterAttribute"/>.
-        /// </summary>
-        /// <param name="configurationType">A type which configures a middleware pipeline.</param>
-        public MiddlewareFilterAttribute(Type configurationType)
-        {
-            if (configurationType == null)
-            {
-                throw new ArgumentNullException(nameof(configurationType));
-            }
+        ArgumentNullException.ThrowIfNull(configurationType);
 
-            ConfigurationType = configurationType;
-        }
+        ConfigurationType = configurationType;
+    }
 
-        public Type ConfigurationType { get; }
+    /// <summary>
+    /// The type which configures a middleware pipeline.
+    /// </summary>
+    public Type ConfigurationType { get; }
 
-        /// <inheritdoc />
-        public int Order { get; set; }
+    /// <inheritdoc />
+    public int Order { get; set; }
 
-        /// <inheritdoc />
-        public bool IsReusable => true;
+    /// <inheritdoc />
+    public bool IsReusable => true;
 
-        /// <inheritdoc />
-        public IFilterMetadata CreateInstance(IServiceProvider serviceProvider)
-        {
-            if (serviceProvider == null)
-            {
-                throw new ArgumentNullException(nameof(serviceProvider));
-            }
+    /// <inheritdoc />
+    public IFilterMetadata CreateInstance(IServiceProvider serviceProvider)
+    {
+        ArgumentNullException.ThrowIfNull(serviceProvider);
 
-            var middlewarePipelineService = serviceProvider.GetRequiredService<MiddlewareFilterBuilder>();
-            var pipeline = middlewarePipelineService.GetPipeline(ConfigurationType);
+        var middlewarePipelineService = serviceProvider.GetRequiredService<MiddlewareFilterBuilder>();
+        var pipeline = middlewarePipelineService.GetPipeline(ConfigurationType);
 
-            return new MiddlewareFilter(pipeline);
-        }
+        return new MiddlewareFilter(pipeline);
     }
 }

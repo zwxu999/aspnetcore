@@ -1,15 +1,18 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 // Everything that users need to access must be exported here. Including interfaces.
 export { AbortSignal } from "./AbortController";
 export { AbortError, HttpError, TimeoutError } from "./Errors";
 export { HttpClient, HttpRequest, HttpResponse } from "./HttpClient";
 export { DefaultHttpClient } from "./DefaultHttpClient";
+export { AuthenticationRefreshFailedContext, AuthenticationRefreshedContext, IAuthenticationRefreshOptions } from "./IAuthenticationRefreshOptions";
 export { IHttpConnectionOptions } from "./IHttpConnectionOptions";
+export { IStatefulReconnectOptions } from "./IStatefulReconnectOptions";
 export { HubConnection, HubConnectionState } from "./HubConnection";
 export { HubConnectionBuilder } from "./HubConnectionBuilder";
-export { MessageType, MessageHeaders, HubMessage, HubMessageBase, HubInvocationMessage, InvocationMessage, StreamInvocationMessage, StreamItemMessage, CompletionMessage,
+export { AckMessage, SequenceMessage, MessageType, MessageHeaders, HubMessage, HubMessageBase,
+    HubInvocationMessage, InvocationMessage, StreamInvocationMessage, StreamItemMessage, CompletionMessage,
     PingMessage, CloseMessage, CancelInvocationMessage, IHubProtocol } from "./IHubProtocol";
 export { ILogger, LogLevel } from "./ILogger";
 export { HttpTransportType, TransferFormat, ITransport } from "./ITransport";

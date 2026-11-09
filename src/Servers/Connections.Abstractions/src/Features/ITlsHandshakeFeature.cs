@@ -1,24 +1,93 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Security.Authentication;
+using System.Security.Cryptography;
+using System;
+using Microsoft.AspNetCore.Shared;
 
-namespace Microsoft.AspNetCore.Connections.Features
+#if NETCOREAPP
+using System.Net.Security;
+#endif
+
+namespace Microsoft.AspNetCore.Connections.Features;
+
+/// <summary>
+/// Represents the details about the TLS handshake.
+/// </summary>
+public interface ITlsHandshakeFeature
 {
-    public interface ITlsHandshakeFeature
-    {
-        SslProtocols Protocol { get; }
+    /// <summary>
+    /// Gets the <see cref="SslProtocols"/>.
+    /// </summary>
+    SslProtocols Protocol { get; }
 
-        CipherAlgorithmType CipherAlgorithm { get; }
+#if NETCOREAPP
+    /// <summary>
+    /// Gets the <see cref="TlsCipherSuite"/>.
+    /// </summary>
+    TlsCipherSuite? NegotiatedCipherSuite => null;
 
-        int CipherStrength { get; }
+    /// <summary>
+    /// Gets the host name from the "server_name" (SNI) extension of the client hello if present.
+    /// See <see href="https://www.rfc-editor.org/rfc/rfc6066#section-3">RFC 6066</see>.
+    /// </summary>
+    string HostName => string.Empty;
+#endif
 
-        HashAlgorithmType HashAlgorithm { get; }
+    /// <summary>
+    /// Gets the <see cref="CipherAlgorithmType"/>.
+    /// </summary>
+#if NETCOREAPP
+    [Obsolete(Obsoletions.RuntimeTlsCipherAlgorithmEnumsMessage, DiagnosticId = Obsoletions.RuntimeTlsCipherAlgorithmEnumsDiagId, UrlFormat = Obsoletions.RuntimeSharedUrlFormat)]
+#endif
+    CipherAlgorithmType CipherAlgorithm { get; }
 
-        int HashStrength { get; }
+    /// <summary>
+    /// Gets the cipher strength.
+    /// </summary>
+#if NETCOREAPP
+    [Obsolete(Obsoletions.RuntimeTlsCipherAlgorithmEnumsMessage, DiagnosticId = Obsoletions.RuntimeTlsCipherAlgorithmEnumsDiagId, UrlFormat = Obsoletions.RuntimeSharedUrlFormat)]
+#endif
+    int CipherStrength { get; }
 
-        ExchangeAlgorithmType KeyExchangeAlgorithm { get; }
+    /// <summary>
+    /// Gets the <see cref="HashAlgorithmType"/>.
+    /// </summary>
+#if NETCOREAPP
+    [Obsolete(Obsoletions.RuntimeTlsCipherAlgorithmEnumsMessage, DiagnosticId = Obsoletions.RuntimeTlsCipherAlgorithmEnumsDiagId, UrlFormat = Obsoletions.RuntimeSharedUrlFormat)]
+#endif
+    HashAlgorithmType HashAlgorithm { get; }
 
-        int KeyExchangeStrength { get; }
-    }
+    /// <summary>
+    /// Gets the hash strength.
+    /// </summary>
+#if NETCOREAPP
+    [Obsolete(Obsoletions.RuntimeTlsCipherAlgorithmEnumsMessage, DiagnosticId = Obsoletions.RuntimeTlsCipherAlgorithmEnumsDiagId, UrlFormat = Obsoletions.RuntimeSharedUrlFormat)]
+#endif
+    int HashStrength { get; }
+
+    /// <summary>
+    /// Gets the <see cref="ExchangeAlgorithmType"/>.
+    /// </summary>
+#if NETCOREAPP
+    [Obsolete(Obsoletions.RuntimeTlsCipherAlgorithmEnumsMessage, DiagnosticId = Obsoletions.RuntimeTlsCipherAlgorithmEnumsDiagId, UrlFormat = Obsoletions.RuntimeSharedUrlFormat)]
+#endif
+    ExchangeAlgorithmType KeyExchangeAlgorithm { get; }
+
+    /// <summary>
+    /// Gets the key exchange algorithm strength.
+    /// </summary>
+#if NETCOREAPP
+    [Obsolete(Obsoletions.RuntimeTlsCipherAlgorithmEnumsMessage, DiagnosticId = Obsoletions.RuntimeTlsCipherAlgorithmEnumsDiagId, UrlFormat = Obsoletions.RuntimeSharedUrlFormat)]
+#endif
+    int KeyExchangeStrength { get; }
+
+#if NETCOREAPP
+    /// <summary>
+    /// Gets the exception that occurred during the TLS handshake, if any.
+    /// <see langword="null"/> if the handshake succeeded or has not yet completed.
+    /// </summary>
+    Exception? Exception => null;
+#endif
 }

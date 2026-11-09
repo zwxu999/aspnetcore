@@ -1,81 +1,108 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Data.Common;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
-namespace Microsoft.AspNetCore.Identity.EntityFrameworkCore.InMemory.Test
+namespace Microsoft.AspNetCore.Identity.EntityFrameworkCore.InMemory.Test;
+
+public class InMemoryContext :
+    InMemoryContext<IdentityUser, IdentityRole, string>
 {
-    public class InMemoryContext :
-        InMemoryContext<IdentityUser, IdentityRole, string>
+    private InMemoryContext(DbConnection connection, IServiceProvider serviceProvider) : base(connection, serviceProvider)
+    { }
+
+    public static new InMemoryContext Create(DbConnection connection, IServiceCollection services = null)
     {
-        private InMemoryContext(DbConnection connection) : base(connection)
-        { }
-
-        public new static InMemoryContext Create(DbConnection connection)
-            => Initialize(new InMemoryContext(connection));
-
-        public static TContext Initialize<TContext>(TContext context) where TContext : DbContext
-        {
-            context.Database.EnsureCreated();
-
-            return context;
-        }
+        services = ConfigureDbServices(services);
+        return Initialize(new InMemoryContext(connection, services.BuildServiceProvider()));
     }
 
-    public class InMemoryContext<TUser> :
-        IdentityUserContext<TUser, string>
-        where TUser : IdentityUser
+    public static IServiceCollection ConfigureDbServices(IServiceCollection services = null)
     {
-        private readonly DbConnection _connection;
-
-        private InMemoryContext(DbConnection connection)
+        services ??= new ServiceCollection();
+        services.Configure<IdentityOptions>(options =>
         {
-            _connection = connection;
-        }
-
-        public static InMemoryContext<TUser> Create(DbConnection connection)
-            => InMemoryContext.Initialize(new InMemoryContext<TUser>(connection));
-
-        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
-            => optionsBuilder.UseSqlite(_connection);
+            options.Stores.SchemaVersion = IdentitySchemaVersions.Version3;
+        });
+        return services;
     }
 
-    public class InMemoryContext<TUser, TRole, TKey> : IdentityDbContext<TUser, TRole, TKey>
-        where TUser : IdentityUser<TKey>
-        where TRole : IdentityRole<TKey>
-        where TKey : IEquatable<TKey>
+    public static TContext Initialize<TContext>(TContext context) where TContext : DbContext
     {
-        private readonly DbConnection _connection;
+        context.Database.EnsureCreated();
 
-        protected InMemoryContext(DbConnection connection)
-        {
-            _connection = connection;
-        }
+        return context;
+    }
+}
 
-        public static InMemoryContext<TUser, TRole, TKey> Create(DbConnection connection)
-            => InMemoryContext.Initialize(new InMemoryContext<TUser, TRole, TKey>(connection));
+public class InMemoryContext<TUser> :
+    IdentityUserContext<TUser, string>
+    where TUser : IdentityUser
+{
+    private readonly DbConnection _connection;
+    private readonly IServiceProvider _serviceProvider;
 
-        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
-            => optionsBuilder.UseSqlite(_connection);
+    private InMemoryContext(DbConnection connection, IServiceProvider serviceProvider)
+    {
+        _connection = connection;
+        _serviceProvider = serviceProvider;
     }
 
-    public abstract class InMemoryContext<TUser, TRole, TKey, TUserClaim, TUserRole, TUserLogin, TRoleClaim, TUserToken> :
-            IdentityDbContext<TUser, TRole, TKey, TUserClaim, TUserRole, TUserLogin, TRoleClaim, TUserToken>
-        where TUser : IdentityUser<TKey>
-        where TRole : IdentityRole<TKey>
-        where TKey : IEquatable<TKey>
-        where TUserClaim : IdentityUserClaim<TKey>
-        where TUserRole : IdentityUserRole<TKey>
-        where TUserLogin : IdentityUserLogin<TKey>
-        where TRoleClaim : IdentityRoleClaim<TKey>
-        where TUserToken : IdentityUserToken<TKey>
+    public static InMemoryContext<TUser> Create(DbConnection connection, IServiceCollection services = null)
     {
-        protected InMemoryContext(DbContextOptions options)
-            : base(options)
-        {
-        }
+        services = InMemoryContext.ConfigureDbServices(services);
+        return InMemoryContext.Initialize(new InMemoryContext<TUser>(connection, services.BuildServiceProvider()));
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        optionsBuilder.UseSqlite(_connection);
+        optionsBuilder.UseApplicationServiceProvider(_serviceProvider);
+    }
+}
+
+public class InMemoryContext<TUser, TRole, TKey> : IdentityDbContext<TUser, TRole, TKey>
+    where TUser : IdentityUser<TKey>
+    where TRole : IdentityRole<TKey>
+    where TKey : IEquatable<TKey>
+{
+    private readonly DbConnection _connection;
+    private readonly IServiceProvider _serviceProvider;
+
+    protected InMemoryContext(DbConnection connection, IServiceProvider serviceProvider)
+    {
+        _connection = connection;
+        _serviceProvider = serviceProvider;
+    }
+
+    public static InMemoryContext<TUser, TRole, TKey> Create(DbConnection connection, IServiceCollection services = null)
+    {
+        services = InMemoryContext.ConfigureDbServices(services);
+        return InMemoryContext.Initialize(new InMemoryContext<TUser, TRole, TKey>(connection, services.BuildServiceProvider()));
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        optionsBuilder.UseSqlite(_connection);
+        optionsBuilder.UseApplicationServiceProvider(_serviceProvider);
+    }
+}
+
+public abstract class InMemoryContext<TUser, TRole, TKey, TUserClaim, TUserRole, TUserLogin, TRoleClaim, TUserToken> :
+        IdentityDbContext<TUser, TRole, TKey, TUserClaim, TUserRole, TUserLogin, TRoleClaim, TUserToken>
+    where TUser : IdentityUser<TKey>
+    where TRole : IdentityRole<TKey>
+    where TKey : IEquatable<TKey>
+    where TUserClaim : IdentityUserClaim<TKey>
+    where TUserRole : IdentityUserRole<TKey>
+    where TUserLogin : IdentityUserLogin<TKey>
+    where TRoleClaim : IdentityRoleClaim<TKey>
+    where TUserToken : IdentityUserToken<TKey>
+{
+    protected InMemoryContext(DbContextOptions options)
+        : base(options)
+    {
     }
 }

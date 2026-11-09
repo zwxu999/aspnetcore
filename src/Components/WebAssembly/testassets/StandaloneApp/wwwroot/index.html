@@ -6,8 +6,9 @@
     <meta name="viewport" content="width=1024">
     <title>Blazor standalone</title>
     <base href="/" />
-    <link href="css/bootstrap/bootstrap.min.css" rel="stylesheet" />
-    <link href="css/app.css" rel="stylesheet" />
+    <link rel="stylesheet" href="css/bootstrap/bootstrap.min.css" />
+    <link rel="stylesheet" href="css/bootstrap-icons/bootstrap-icons.min.css" />
+    <link rel="stylesheet" href="css/app.css" />
 </head>
 <body>
     <app>Loading...</app>
@@ -18,6 +19,13 @@
         <a class="dismiss">🗙</a>
     </div>
 
-    <script src="_framework/blazor.webassembly.js"></script>
+    <script src="_framework/blazor.webassembly.js" autostart="false"></script>
+    <script>
+        (function(){
+            Blazor.start().then(function () {
+                window['__aspnetcore__testing__blazor_wasm__started__'] = true;
+            });
+        })();
+    </script>
 </body>
 </html>

@@ -1,24 +1,30 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System.Collections.Generic;
+#nullable enable
+
 using Microsoft.AspNetCore.Mvc.ModelBinding.Metadata;
 using Microsoft.Extensions.Options;
 
-namespace Microsoft.AspNetCore.Mvc.ModelBinding
-{
-    public class EmptyModelMetadataProvider : DefaultModelMetadataProvider
-    {
-        public EmptyModelMetadataProvider()
-            : base(
-                  new DefaultCompositeMetadataDetailsProvider(new List<IMetadataDetailsProvider>()),
-                  new OptionsAccessor())
-        {
-        }
+namespace Microsoft.AspNetCore.Mvc.ModelBinding;
 
-        private class OptionsAccessor : IOptions<MvcOptions>
-        {
-            public MvcOptions Value { get; } = new MvcOptions();
-        }
+/// <summary>
+/// A <see cref="DefaultBindingMetadataProvider"/> that represents an empty model.
+/// </summary>
+public class EmptyModelMetadataProvider : DefaultModelMetadataProvider
+{
+    /// <summary>
+    /// Initializes a new <see cref="EmptyModelMetadataProvider"/>.
+    /// </summary>
+    public EmptyModelMetadataProvider()
+        : base(
+              new DefaultCompositeMetadataDetailsProvider(new List<IMetadataDetailsProvider>()),
+              new OptionsAccessor())
+    {
+    }
+
+    private sealed class OptionsAccessor : IOptions<MvcOptions>
+    {
+        public MvcOptions Value { get; } = new MvcOptions();
     }
 }

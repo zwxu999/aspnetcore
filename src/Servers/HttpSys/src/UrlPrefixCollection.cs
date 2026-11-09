@@ -1,243 +1,261 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.HttpSys.Internal;
 
-namespace Microsoft.AspNetCore.Server.HttpSys
+namespace Microsoft.AspNetCore.Server.HttpSys;
+
+/// <summary>
+/// A collection or URL prefixes
+/// </summary>
+public class UrlPrefixCollection : ICollection<UrlPrefix>
 {
-    /// <summary>
-    /// A collection or URL prefixes
-    /// </summary>
-    public class UrlPrefixCollection : ICollection<UrlPrefix>
+    private readonly IDictionary<int, UrlPrefix> _prefixes = new Dictionary<int, UrlPrefix>(1);
+    private UrlGroup? _urlGroup;
+    private int _nextId = 1;
+
+    // Valid port range of 5000 - 48000.
+    private const int BasePort = 5000;
+    private const int MaxPortIndex = 43000;
+    private const int MaxRetries = 1000;
+    private static int NextPortIndex;
+
+    internal UrlPrefixCollection()
     {
-        private readonly IDictionary<int, UrlPrefix> _prefixes = new Dictionary<int, UrlPrefix>(1);
-        private UrlGroup _urlGroup;
-        private int _nextId = 1;
+    }
 
-        // Valid port range of 5000 - 48000.
-        private const int BasePort = 5000;
-        private const int MaxPortIndex = 43000;
-        private const int MaxRetries = 1000;
-        private static int NextPortIndex;
-
-        internal UrlPrefixCollection()
+    /// <inheritdoc />
+    public int Count
+    {
+        get
         {
-        }
-
-        public int Count
-        {
-            get
+            lock (_prefixes)
             {
-                lock (_prefixes)
+                return _prefixes.Count;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets a value that determines if this collection is readOnly.
+    /// </summary>
+    public bool IsReadOnly
+    {
+        get { return false; }
+    }
+
+    /// <summary>
+    /// Creates a <see cref="UrlPrefix"/> from the given string, and adds it to this collection.
+    /// </summary>
+    /// <param name="prefix">The string representing the <see cref="UrlPrefix"/> to add to this collection.</param>
+    public void Add(string prefix)
+    {
+        Add(UrlPrefix.Create(prefix));
+    }
+
+    /// <summary>
+    /// Adds a <see cref="UrlPrefix"/> to this collection.
+    /// </summary>
+    /// <param name="item">The prefix to add to this collection.</param>
+    public void Add(UrlPrefix item)
+    {
+        lock (_prefixes)
+        {
+            var id = _nextId++;
+            _urlGroup?.RegisterPrefix(item.FullPrefix, id);
+            _prefixes.Add(id, item);
+        }
+    }
+
+    internal UrlPrefix? GetPrefix(int id)
+    {
+        lock (_prefixes)
+        {
+            return _prefixes.TryGetValue(id, out var prefix) ? prefix : null;
+        }
+    }
+
+    internal bool TryMatchLongestPrefix(bool isHttps, string host, string originalPath, [NotNullWhen(true)] out string? pathBase, [NotNullWhen(true)] out string? remainingPath)
+    {
+        var originalPathString = new PathString(originalPath);
+        var found = false;
+        pathBase = null;
+        remainingPath = null;
+        lock (_prefixes)
+        {
+            foreach (var prefix in _prefixes.Values)
+            {
+                // The scheme, host, port, and start of path must match.
+                // Note this does not currently handle prefixes with wildcard subdomains.
+                if (isHttps == prefix.IsHttps
+                    && string.Equals(host, prefix.HostAndPort, StringComparison.OrdinalIgnoreCase)
+                    && originalPathString.StartsWithSegments(new PathString(prefix.PathWithoutTrailingSlash), StringComparison.OrdinalIgnoreCase, out var remainder)
+                    && (!found || remainder.Value!.Length < remainingPath!.Length)) // Longest match
                 {
-                    return _prefixes.Count;
+                    found = true;
+                    pathBase = originalPath.Substring(0, prefix.PathWithoutTrailingSlash.Length); // Maintain the input casing
+                    remainingPath = remainder.Value;
                 }
             }
         }
+        return found;
+    }
 
-        public bool IsReadOnly
+    /// <inheritdoc />
+    public void Clear()
+    {
+        lock (_prefixes)
         {
-            get { return false; }
-        }
-
-        public void Add(string prefix)
-        {
-            Add(UrlPrefix.Create(prefix));
-        }
-
-        public void Add(UrlPrefix item)
-        {
-            lock (_prefixes)
+            if (_urlGroup != null)
             {
-                var id = _nextId++;
-                if (_urlGroup != null)
+                UnregisterAllPrefixes();
+            }
+            _prefixes.Clear();
+        }
+    }
+
+    /// <inheritdoc />
+    public bool Contains(UrlPrefix item)
+    {
+        lock (_prefixes)
+        {
+            return _prefixes.Values.Contains(item);
+        }
+    }
+
+    /// <inheritdoc />
+    public void CopyTo(UrlPrefix[] array, int arrayIndex)
+    {
+        lock (_prefixes)
+        {
+            _prefixes.Values.CopyTo(array, arrayIndex);
+        }
+    }
+
+    /// <inheritdoc />
+    public bool Remove(string prefix)
+    {
+        return Remove(UrlPrefix.Create(prefix));
+    }
+
+    /// <inheritdoc />
+    public bool Remove(UrlPrefix item)
+    {
+        lock (_prefixes)
+        {
+            int? id = null;
+            foreach (var pair in _prefixes)
+            {
+                if (pair.Value.Equals(item))
                 {
-                    _urlGroup.RegisterPrefix(item.FullPrefix, id);
+                    id = pair.Key;
+                    _urlGroup?.UnregisterPrefix(pair.Value.FullPrefix);
                 }
-                _prefixes.Add(id, item);
             }
-        }
-
-        internal UrlPrefix GetPrefix(int id)
-        {
-            lock (_prefixes)
+            if (id.HasValue)
             {
-                return _prefixes.TryGetValue(id, out var prefix) ? prefix : null;
+                _prefixes.Remove(id.Value);
+                return true;
             }
+            return false;
         }
+    }
 
-        internal bool TryMatchLongestPrefix(bool isHttps, string host, string originalPath, out string pathBase, out string remainingPath)
+    /// <summary>
+    /// Returns an enumerator that iterates through this collection.
+    /// </summary>
+    public IEnumerator<UrlPrefix> GetEnumerator()
+    {
+        lock (_prefixes)
         {
-            var originalPathString = new PathString(originalPath);
-            var found = false;
-            pathBase = null;
-            remainingPath = null;
-            lock (_prefixes)
+            return _prefixes.Values.GetEnumerator();
+        }
+    }
+
+    IEnumerator IEnumerable.GetEnumerator()
+    {
+        return GetEnumerator();
+    }
+
+    internal void RegisterAllPrefixes(UrlGroup urlGroup)
+    {
+        lock (_prefixes)
+        {
+            _urlGroup = urlGroup;
+            // go through the uri list and register for each one of them
+            // Call ToList to avoid modification when enumerating.
+            foreach (var pair in _prefixes.ToList())
             {
-                foreach (var prefix in _prefixes.Values)
+                var urlPrefix = pair.Value;
+                if (urlPrefix.PortValue == 0)
                 {
-                    // The scheme, host, port, and start of path must match.
-                    // Note this does not currently handle prefixes with wildcard subdomains.
-                    if (isHttps == prefix.IsHttps
-                        && string.Equals(host, prefix.HostAndPort, StringComparison.OrdinalIgnoreCase)
-                        && originalPathString.StartsWithSegments(new PathString(prefix.PathWithoutTrailingSlash), StringComparison.OrdinalIgnoreCase, out var remainder)
-                        && (!found || remainder.Value.Length < remainingPath.Length)) // Longest match
+                    if (urlPrefix.IsHttps)
                     {
-                        found = true;
-                        pathBase = originalPath.Substring(0, prefix.PathWithoutTrailingSlash.Length); // Maintain the input casing
-                        remainingPath = remainder.Value;
+                        throw new InvalidOperationException("Cannot bind to port 0 with https.");
                     }
-                }
-            }
-            return found;
-        }
 
-        public void Clear()
-        {
-            lock (_prefixes)
-            {
-                if (_urlGroup != null)
+                    FindHttpPortUnsynchronized(pair.Key, urlPrefix);
+                }
+                else
                 {
-                    UnregisterAllPrefixes();
+                    // We'll get this index back on each request and use it to look up the prefix to calculate PathBase.
+                    _urlGroup.RegisterPrefix(pair.Value.FullPrefix, pair.Key);
                 }
-                _prefixes.Clear();
             }
         }
+    }
 
-        public bool Contains(UrlPrefix item)
+    private void FindHttpPortUnsynchronized(int key, UrlPrefix urlPrefix)
+    {
+        Debug.Assert(_urlGroup != null);
+
+        for (var index = 0; index < MaxRetries; index++)
         {
-            lock (_prefixes)
+            try
             {
-                return _prefixes.Values.Contains(item);
+                // Bit of complicated math to always try 3000 ports, starting from NextPortIndex + 5000,
+                // circling back around if we go above 8000 back to 5000, and so on.
+                var port = ((index + NextPortIndex) % MaxPortIndex) + BasePort;
+
+                Debug.Assert(port >= 5000 || port < 8000);
+
+                var newPrefix = UrlPrefix.Create(urlPrefix.Scheme, urlPrefix.Host, port, urlPrefix.Path);
+                _urlGroup.RegisterPrefix(newPrefix.FullPrefix, key);
+                _prefixes[key] = newPrefix;
+
+                NextPortIndex += index + 1;
+                return;
             }
-        }
-
-        public void CopyTo(UrlPrefix[] array, int arrayIndex)
-        {
-            lock (_prefixes)
+            catch (HttpSysException ex)
             {
-                _prefixes.Values.CopyTo(array, arrayIndex);
-            }
-        }
-
-        public bool Remove(string prefix)
-        {
-            return Remove(UrlPrefix.Create(prefix));
-        }
-
-        public bool Remove(UrlPrefix item)
-        {
-            lock (_prefixes)
-            {
-                int? id = null;
-                foreach (var pair in _prefixes)
+                if ((ex.ErrorCode != ErrorCodes.ERROR_ACCESS_DENIED
+                    && ex.ErrorCode != ErrorCodes.ERROR_SHARING_VIOLATION
+                    && ex.ErrorCode != ErrorCodes.ERROR_ALREADY_EXISTS) || index == MaxRetries - 1)
                 {
-                    if (pair.Value.Equals(item))
-                    {
-                        id = pair.Key;
-                        if (_urlGroup != null)
-                        {
-                            _urlGroup.UnregisterPrefix(pair.Value.FullPrefix);
-                        }
-                    }
-                }
-                if (id.HasValue)
-                {
-                    _prefixes.Remove(id.Value);
-                    return true;
-                }
-                return false;
-            }
-        }
-
-        public IEnumerator<UrlPrefix> GetEnumerator()
-        {
-            lock (_prefixes)
-            {
-                return _prefixes.Values.GetEnumerator();
-            }
-        }
-
-        IEnumerator IEnumerable.GetEnumerator()
-        {
-            return GetEnumerator();
-        }
-
-        internal void RegisterAllPrefixes(UrlGroup urlGroup)
-        {
-            lock (_prefixes)
-            {
-                _urlGroup = urlGroup;
-                // go through the uri list and register for each one of them
-                // Call ToList to avoid modification when enumerating.
-                foreach (var pair in _prefixes.ToList())
-                {
-                    var urlPrefix = pair.Value;
-                    if (urlPrefix.PortValue == 0)
-                    {
-                        if (urlPrefix.IsHttps)
-                        {
-                            throw new InvalidOperationException("Cannot bind to port 0 with https.");
-                        }
-
-                        FindHttpPortUnsynchronized(pair.Key, urlPrefix);
-                    }
-                    else
-                    {
-                        // We'll get this index back on each request and use it to look up the prefix to calculate PathBase.
-                        _urlGroup.RegisterPrefix(pair.Value.FullPrefix, pair.Key);
-                    }
+                    throw;
                 }
             }
         }
+    }
 
-        private void FindHttpPortUnsynchronized(int key, UrlPrefix urlPrefix)
+    internal void UnregisterAllPrefixes()
+    {
+        lock (_prefixes)
         {
-            for (var index = 0; index < MaxRetries; index++)
+            if (_urlGroup == null)
             {
-                try
-                {
-                    // Bit of complicated math to always try 3000 ports, starting from NextPortIndex + 5000,
-                    // circling back around if we go above 8000 back to 5000, and so on.
-                    var port = ((index + NextPortIndex) % MaxPortIndex) + BasePort;
-
-                    Debug.Assert(port >= 5000 || port < 8000);
-
-                    var newPrefix = UrlPrefix.Create(urlPrefix.Scheme, urlPrefix.Host, port, urlPrefix.Path);
-                    _urlGroup.RegisterPrefix(newPrefix.FullPrefix, key);
-                    _prefixes[key] = newPrefix;
-
-                    NextPortIndex += index + 1;
-                    return;
-                }
-                catch (HttpSysException ex)
-                {
-                    if ((ex.ErrorCode != UnsafeNclNativeMethods.ErrorCodes.ERROR_ACCESS_DENIED
-                        && ex.ErrorCode != UnsafeNclNativeMethods.ErrorCodes.ERROR_SHARING_VIOLATION
-                        && ex.ErrorCode != UnsafeNclNativeMethods.ErrorCodes.ERROR_ALREADY_EXISTS) || index == MaxRetries - 1)
-                    {
-                        throw;
-                    }
-                }
+                return;
             }
-        }
 
-        internal void UnregisterAllPrefixes()
-        {
-            lock (_prefixes)
+            // go through the uri list and unregister for each one of them
+            foreach (var prefix in _prefixes.Values)
             {
-                // go through the uri list and unregister for each one of them
-                foreach (var prefix in _prefixes.Values)
-                {
-                    // ignore possible failures
-                    _urlGroup.UnregisterPrefix(prefix.FullPrefix);
-                }
+                // ignore possible failures
+                _urlGroup.UnregisterPrefix(prefix.FullPrefix);
             }
         }
     }

@@ -4,12 +4,12 @@
 #pragma once
 
 #include "applicationinfo.h"
-#include "multisz.h"
 #include "exceptions.h"
 #include <unordered_map>
+#include <atomic>
 
 //
-// This class will manage the lifecycle of all Asp.Net Core applciation
+// This class will manage the lifecycle of all Asp.Net Core application
 // It should be global singleton.
 // Should always call GetInstance to get the object instance
 //
@@ -37,9 +37,36 @@ public:
                             m_pApplicationInfoHash(NULL),
                             m_fDebugInitialize(FALSE),
                             m_pHttpServer(pHttpServer),
-                            m_handlerResolver(hModule, pHttpServer)
+                            m_handlerResolver(hModule, pHttpServer),
+                            m_hasStarted(false)
     {
         InitializeSRWLock(&m_srwLock);
+    }
+
+    bool
+    ShouldRecycleOnConfigChange()
+    {
+        return !m_handlerResolver.GetDisallowRotationOnConfigChange();
+    }
+
+    std::chrono::milliseconds GetShutdownDelay() const
+    {
+        return m_handlerResolver.GetShutdownDelay();
+    }
+
+    bool UseLegacyShutdown() const
+    {
+        return m_handlerResolver.GetShutdownDelay() == std::chrono::milliseconds::zero();
+    }
+
+    bool IsIISExpress() const
+    {
+        return m_pHttpServer.IsCommandLineLaunch();
+    }
+
+    bool HasReceivedRequest() const
+    {
+        return m_hasStarted;
     }
 
 private:
@@ -49,4 +76,5 @@ private:
     BOOL                        m_fDebugInitialize;
     IHttpServer                &m_pHttpServer;
     HandlerResolver             m_handlerResolver;
+    std::atomic<bool>           m_hasStarted;
 };

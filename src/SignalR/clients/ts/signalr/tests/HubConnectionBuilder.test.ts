@@ -1,6 +1,7 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
+import { HttpConnection } from "signalr/src/HttpConnection";
 import { DefaultReconnectPolicy } from "../src/DefaultReconnectPolicy";
 import { HttpRequest, HttpResponse } from "../src/HttpClient";
 import { HubConnection, HubConnectionState } from "../src/HubConnection";
@@ -30,7 +31,6 @@ const commonHttpOptions: IHttpConnectionOptions = {
 };
 
 // We use a different mapping table here to help catch any unintentional breaking changes.
-// tslint:disable:object-literal-sort-keys
 const ExpectedLogLevelMappings = {
     trace: LogLevel.Trace,
     debug: LogLevel.Debug,
@@ -47,22 +47,22 @@ class CapturingConsole {
     public messages: any[] = [];
 
     public error(message: any) {
-        this.messages.push(CapturingConsole.stripPrefix(message));
+        this.messages.push(CapturingConsole._stripPrefix(message));
     }
 
     public warn(message: any) {
-        this.messages.push(CapturingConsole.stripPrefix(message));
+        this.messages.push(CapturingConsole._stripPrefix(message));
     }
 
     public info(message: any) {
-        this.messages.push(CapturingConsole.stripPrefix(message));
+        this.messages.push(CapturingConsole._stripPrefix(message));
     }
 
     public log(message: any) {
-        this.messages.push(CapturingConsole.stripPrefix(message));
+        this.messages.push(CapturingConsole._stripPrefix(message));
     }
 
-    private static stripPrefix(input: any): any {
+    private static _stripPrefix(input: any): any {
         if (typeof input === "string") {
             input = input.replace(/\[.*\]\s+/, "");
         }
@@ -155,7 +155,7 @@ describe("HubConnectionBuilder", () => {
     describe("configureLogging", () => {
         function testLogLevels(logger: ILogger, minLevel: LogLevel) {
             const capturingConsole = new CapturingConsole();
-            (logger as ConsoleLogger).outputConsole = capturingConsole;
+            (logger as ConsoleLogger).out = capturingConsole;
 
             for (let level = LogLevel.Trace; level < LogLevel.None; level++) {
                 const message = `Message at LogLevel.${LogLevel[level]}`;
@@ -198,7 +198,7 @@ describe("HubConnectionBuilder", () => {
             });
         });
 
-        const levelNames = Object.keys(ExpectedLogLevelMappings) as Array<keyof typeof ExpectedLogLevelMappings>;
+        const levelNames = Object.keys(ExpectedLogLevelMappings) as (keyof typeof ExpectedLogLevelMappings)[];
         for (const str of levelNames) {
             const mapped = ExpectedLogLevelMappings[str];
             const mappedName = LogLevel[mapped];
@@ -384,6 +384,59 @@ describe("HubConnectionBuilder", () => {
         };
 
         expect(builder.reconnectPolicy!.nextRetryDelayInMilliseconds(retryContextFinal)).toBe(null);
+    });
+
+    it("can configure serverTimeoutInMilliseconds for HubConnection", async () => {
+        const milliseconds = 60000;
+
+        const connection = createConnectionBuilder()
+            .withUrl("http://example.com")
+            .withServerTimeout(milliseconds)
+            .build();
+
+        expect(connection.serverTimeoutInMilliseconds).toBe(milliseconds);
+    });
+
+    it("can configure keepAliveIntervalInMilliseconds for HubConnection", async () => {
+        const milliseconds = 60000;
+
+        const connection = createConnectionBuilder()
+            .withUrl("http://example.com")
+            .withKeepAliveInterval(milliseconds)
+            .build();
+
+        expect(connection.keepAliveIntervalInMilliseconds).toBe(milliseconds);
+    });
+
+    it("can configure Stateful Reconnect buffer limit on HubConnection", () => {
+        const connection = createConnectionBuilder()
+            .withUrl("http://example.com")
+            .withStatefulReconnect({ bufferSize: 103 })
+            .build();
+
+        expect((connection as any)._statefulReconnectBufferSize).toBe(103);
+    });
+
+    it("enables Stateful Reconnect on HttpConnection", () => {
+        const connection = createConnectionBuilder()
+            .withUrl("http://example.com")
+            .withStatefulReconnect()
+            .build();
+
+        expect((connection as any).connection._options._useStatefulReconnect).toBe(true);
+    });
+
+    it("merges Authentication Refresh options from multiple calls", () => {
+        const connection = createConnectionBuilder()
+            .withUrl("http://example.com")
+            .withAuthenticationRefresh({ enableAutoRefresh: false })
+            .withAuthenticationRefresh({ refreshBeforeExpirationInMilliseconds: 60_000 })
+            .build();
+
+        expect((connection as any)._authenticationRefreshOptions).toEqual({
+            enableAutoRefresh: false,
+            refreshBeforeExpirationInMilliseconds: 60_000,
+        });
     });
 });
 

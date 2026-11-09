@@ -1,86 +1,148 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 using BasicTestApp;
 using Microsoft.AspNetCore.Components.E2ETest.Infrastructure.ServerFixtures;
 using Microsoft.AspNetCore.Components.E2ETest.Tests;
 using Microsoft.AspNetCore.E2ETesting;
+using Microsoft.AspNetCore.InternalTesting;
 using Xunit.Abstractions;
 
-namespace Microsoft.AspNetCore.Components.E2ETest.ServerExecutionTests
+namespace Microsoft.AspNetCore.Components.E2ETest.ServerExecutionTests;
+
+public class ServerBindTest : BindTest
 {
-    public class ServerBindTest : BindTest
+    public ServerBindTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution(), output)
     {
-        public ServerBindTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
-            : base(browserFixture, serverFixture.WithServerExecution(), output)
-        {
-        }
+    }
+}
+
+public class ServerEventBubblingTest : EventBubblingTest
+{
+    public ServerEventBubblingTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution(), output)
+    {
+    }
+}
+
+public class ServerInteropTest : InteropTest
+{
+    public ServerInteropTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution().WithAdditionalArguments(GetAdditionalArguments()), output)
+    {
     }
 
-    public class ServerEventBubblingTest : EventBubblingTest
+    private static string[] GetAdditionalArguments() =>
+        new string[] { "--detailedErrors", "true" };
+}
+
+public class ServerRoutingTest : RoutingTest
+{
+    public ServerRoutingTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution(), output)
     {
-        public ServerEventBubblingTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
-            : base(browserFixture, serverFixture.WithServerExecution(), output)
-        {
-        }
     }
 
-    public class ServerEventTest : EventTest
+    [QuarantinedTest("https://github.com/dotnet/aspnetcore/issues/66041")]
+    public override void NavigationLock_CanBlockExternalNavigation()
+        => base.NavigationLock_CanBlockExternalNavigation();
+
+    [QuarantinedTest("https://github.com/dotnet/aspnetcore/issues/61080")]
+    public override void NavigationLock_OverlappingNavigationsCancelExistingNavigations_HistoryNavigation()
+        => base.NavigationLock_OverlappingNavigationsCancelExistingNavigations_HistoryNavigation();
+
+    public override void CanNavigateToQueryStringPageWithNoQuery()
+        => base.CanNavigateToQueryStringPageWithNoQuery();
+}
+
+public class ServerCascadingValueTest : CascadingValueTest
+{
+    public ServerCascadingValueTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution(), output)
     {
-        public ServerEventTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
-            : base(browserFixture, serverFixture.WithServerExecution(), output)
-        {
-        }
+    }
+}
+
+public class ServerEventCallbackTest : EventCallbackTest
+{
+    public ServerEventCallbackTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution(), output)
+    {
+    }
+}
+
+public class ServerFormsTest : FormsTest
+{
+    public ServerFormsTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution(), output)
+    {
+    }
+}
+
+public class ServerKeyTest : KeyTest
+{
+    public ServerKeyTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution(), output)
+    {
+    }
+}
+
+public class ServerInputFileTest : InputFileTest
+{
+    public ServerInputFileTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution(), output)
+    {
+    }
+}
+
+public class ServerVirtualizationTest : VirtualizationTest
+{
+    public ServerVirtualizationTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution(), output)
+    {
     }
 
-    public class ServerInteropTest : InteropTest
-    {
-        public ServerInteropTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
-            : base(browserFixture, serverFixture.WithServerExecution().WithAdditionalArguments(GetAdditionalArguments()), output)
-        {
-        }
+    public override void CanRenderHtmlTable()
+        => base.CanRenderHtmlTable();
 
-        private static string[] GetAdditionalArguments() =>
-            new string[] { "--detailedErrors", "true" };
+    public override void CancelsOutdatedRefreshes_Async()
+        => base.CancelsOutdatedRefreshes_Async();
+
+    public override void DynamicContent_PrependItemsWhileScrolledToMiddle_VisibleItemsStayInPlace()
+        => base.DynamicContent_PrependItemsWhileScrolledToMiddle_VisibleItemsStayInPlace();
+
+    [QuarantinedTest("https://github.com/dotnet/aspnetcore/issues/66119")]
+    public override void NonZeroStartIndex_ScrollToMiddleThenMeasure()
+        => base.NonZeroStartIndex_ScrollToMiddleThenMeasure();
+
+    public override void AnchorMode_End_AppendAfterLeavingBottom_DoesNotReengage(bool variableHeight, bool useItemsProvider)
+        => base.AnchorMode_End_AppendAfterLeavingBottom_DoesNotReengage(variableHeight, useItemsProvider);
+
+    public override void QuickGrid_AnchorMode_Top_AppendKeepsViewportStable(string anchorMode, bool useItemsProvider)
+        => base.QuickGrid_AnchorMode_Top_AppendKeepsViewportStable(anchorMode, useItemsProvider);
+}
+
+public class ServerDynamicComponentRenderingTest : DynamicComponentRenderingTest
+{
+    public ServerDynamicComponentRenderingTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution(), output)
+    {
     }
+}
 
-    public class ServerRoutingTest : RoutingTest
+public class ServerEventCustomArgsTest : EventCustomArgsTest
+{
+    public ServerEventCustomArgsTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution(), output)
     {
-        public ServerRoutingTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
-            : base(browserFixture, serverFixture.WithServerExecution(), output)
-        {
-        }
     }
+}
 
-    public class ServerCascadingValueTest : CascadingValueTest
+public class ServerErrorBoundaryTest : ErrorBoundaryTest
+{
+    public ServerErrorBoundaryTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
+        : base(browserFixture, serverFixture.WithServerExecution(), output)
     {
-        public ServerCascadingValueTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
-            : base(browserFixture, serverFixture.WithServerExecution(), output)
-        {
-        }
-    }
-
-    public class ServerEventCallbackTest : EventCallbackTest
-    {
-        public ServerEventCallbackTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
-            : base(browserFixture, serverFixture.WithServerExecution(), output)
-        {
-        }
-    }
-
-    public class ServerFormsTest : FormsTest
-    {
-        public ServerFormsTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
-            : base(browserFixture, serverFixture.WithServerExecution(), output)
-        {
-        }
-    }
-
-    public class ServerKeyTest : KeyTest
-    {
-        public ServerKeyTest(BrowserFixture browserFixture, ToggleExecutionModeServerFixture<Program> serverFixture, ITestOutputHelper output)
-            : base(browserFixture, serverFixture.WithServerExecution(), output)
-        {
-        }
     }
 }

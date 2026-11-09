@@ -1,92 +1,88 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
-using System.Collections.Generic;
 using Moq;
-using Xunit;
 
-namespace Microsoft.AspNetCore.Mvc.ModelBinding.Binders
+namespace Microsoft.AspNetCore.Mvc.ModelBinding.Binders;
+#pragma warning disable CS0618 // Type or member is obsolete
+public class ComplexTypeModelBinderProviderTest
 {
-    public class ComplexTypeModelBinderProviderTest
+    [Theory]
+    [InlineData(typeof(string))]
+    [InlineData(typeof(int))]
+    [InlineData(typeof(List<int>))]
+    public void Create_ForNonComplexType_ReturnsNull(Type modelType)
     {
-        [Theory]
-        [InlineData(typeof(string))]
-        [InlineData(typeof(int))]
-        [InlineData(typeof(List<int>))]
-        public void Create_ForNonComplexType_ReturnsNull(Type modelType)
+        // Arrange
+        var provider = new ComplexTypeModelBinderProvider();
+
+        var context = new TestModelBinderProviderContext(modelType);
+
+        // Act
+        var result = provider.GetBinder(context);
+
+        // Assert
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void Create_ForSupportedTypes_ReturnsBinder()
+    {
+        // Arrange
+        var provider = new ComplexTypeModelBinderProvider();
+
+        var context = new TestModelBinderProviderContext(typeof(Person));
+        context.OnCreatingBinder(m =>
         {
-            // Arrange
-            var provider = new ComplexTypeModelBinderProvider();
-
-            var context = new TestModelBinderProviderContext(modelType);
-
-            // Act
-            var result = provider.GetBinder(context);
-
-            // Assert
-            Assert.Null(result);
-        }
-
-        [Fact]
-        public void Create_ForSupportedTypes_ReturnsBinder()
-        {
-            // Arrange
-            var provider = new ComplexTypeModelBinderProvider();
-
-            var context = new TestModelBinderProviderContext(typeof(Person));
-            context.OnCreatingBinder(m =>
+            if (m.ModelType == typeof(int) || m.ModelType == typeof(string))
             {
-                if (m.ModelType == typeof(int) || m.ModelType == typeof(string))
-                {
-                    return Mock.Of<IModelBinder>();
-                }
-                else
-                {
-                    Assert.False(true, "Not the right model type");
-                    return null;
-                }
-            });
-
-            // Act
-            var result = provider.GetBinder(context);
-
-            // Assert
-            Assert.IsType<ComplexTypeModelBinder>(result);
-        }
-
-        [Fact]
-        public void Create_ForSupportedType_ReturnsBinder()
-        {
-            // Arrange
-            var provider = new ComplexTypeModelBinderProvider();
-
-            var context = new TestModelBinderProviderContext(typeof(Person));
-            context.OnCreatingBinder(m =>
+                return Mock.Of<IModelBinder>();
+            }
+            else
             {
-                if (m.ModelType == typeof(int) || m.ModelType == typeof(string))
-                {
-                    return Mock.Of<IModelBinder>();
-                }
-                else
-                {
-                    Assert.False(true, "Not the right model type");
-                    return null;
-                }
-            });
+                Assert.Fail("Not the right model type");
+                return null;
+            }
+        });
 
-            // Act
-            var result = provider.GetBinder(context);
+        // Act
+        var result = provider.GetBinder(context);
 
-            // Assert
-            Assert.IsType<ComplexTypeModelBinder>(result);
-        }
+        // Assert
+        Assert.IsType<ComplexTypeModelBinder>(result);
+    }
 
-        private class Person
+    [Fact]
+    public void Create_ForSupportedType_ReturnsBinder()
+    {
+        // Arrange
+        var provider = new ComplexTypeModelBinderProvider();
+
+        var context = new TestModelBinderProviderContext(typeof(Person));
+        context.OnCreatingBinder(m =>
         {
-            public string Name { get; set; }
+            if (m.ModelType == typeof(int) || m.ModelType == typeof(string))
+            {
+                return Mock.Of<IModelBinder>();
+            }
+            else
+            {
+                Assert.Fail("Not the right model type");
+                return null;
+            }
+        });
 
-            public int Age { get; set; }
-        }
+        // Act
+        var result = provider.GetBinder(context);
+
+        // Assert
+        Assert.IsType<ComplexTypeModelBinder>(result);
+    }
+
+    private class Person
+    {
+        public string Name { get; set; }
+
+        public int Age { get; set; }
     }
 }

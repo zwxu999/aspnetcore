@@ -5,10 +5,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Reference Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" />
-    <Reference Include="Microsoft.EntityFrameworkCore.InMemory" />
-    <!-- Avoid CS1705 errors due to mix of assemblies brought in transitively. -->
-    <Reference Include="Microsoft.AspNetCore.DataProtection" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" />
+
+    <ProjectReference Include="$(RepoRoot)src\DataProtection\EntityFrameworkCore\src\Microsoft.AspNetCore.DataProtection.EntityFrameworkCore.csproj" />
   </ItemGroup>
 
 </Project>

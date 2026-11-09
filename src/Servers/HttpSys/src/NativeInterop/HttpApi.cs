@@ -1,149 +1,106 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
-using Microsoft.AspNetCore.HttpSys.Internal;
-using static Microsoft.AspNetCore.HttpSys.Internal.HttpApiTypes;
+using Windows.Win32;
+using Windows.Win32.Networking.HttpServer;
 
-namespace Microsoft.AspNetCore.Server.HttpSys
+namespace Microsoft.AspNetCore.Server.HttpSys;
+
+internal static partial class HttpApi
 {
-    internal static unsafe class HttpApi
+    private const string api_ms_win_core_io_LIB = "api-ms-win-core-io-l1-1-0.dll";
+    private const string HTTPAPI = "httpapi.dll";
+
+    [LibraryImport(HTTPAPI, SetLastError = true)]
+    internal static partial uint HttpReceiveRequestEntityBody(SafeHandle requestQueueHandle, ulong requestId, uint flags, IntPtr pEntityBuffer, uint entityBufferLength, out uint bytesReturned, SafeNativeOverlapped pOverlapped);
+
+    [LibraryImport(HTTPAPI, SetLastError = true)]
+    internal static unsafe partial uint HttpReceiveClientCertificate(SafeHandle requestQueueHandle, ulong connectionId, uint flags, Windows.Win32.Networking.HttpServer.HTTP_SSL_CLIENT_CERT_INFO* pSslClientCertInfo, uint sslClientCertInfoSize, uint* pBytesReceived, SafeNativeOverlapped pOverlapped);
+
+    [LibraryImport(HTTPAPI, SetLastError = true)]
+    internal static unsafe partial uint HttpReceiveHttpRequest(SafeHandle requestQueueHandle, ulong requestId, uint flags, Windows.Win32.Networking.HttpServer.HTTP_REQUEST_V1* pRequestBuffer, uint requestBufferLength, uint* pBytesReturned, NativeOverlapped* pOverlapped);
+
+    [LibraryImport(HTTPAPI, SetLastError = true)]
+    internal static unsafe partial uint HttpSendHttpResponse(SafeHandle requestQueueHandle, ulong requestId, uint flags, Windows.Win32.Networking.HttpServer.HTTP_RESPONSE_V2* pHttpResponse, Windows.Win32.Networking.HttpServer.HTTP_CACHE_POLICY* pCachePolicy, uint* pBytesSent, IntPtr pReserved1, uint Reserved2, SafeNativeOverlapped pOverlapped, IntPtr pLogData);
+
+    [LibraryImport(HTTPAPI, SetLastError = true)]
+    internal static unsafe partial uint HttpWaitForDisconnectEx(SafeHandle requestQueueHandle, ulong connectionId, uint reserved, NativeOverlapped* overlapped);
+
+    [LibraryImport(HTTPAPI, SetLastError = true)]
+    internal static unsafe partial uint HttpSendResponseEntityBody(SafeHandle requestQueueHandle, ulong requestId, uint flags, ushort entityChunkCount, Windows.Win32.Networking.HttpServer.HTTP_DATA_CHUNK* pEntityChunks, uint* pBytesSent, IntPtr pReserved1, uint Reserved2, SafeNativeOverlapped pOverlapped, IntPtr pLogData);
+
+    [LibraryImport(api_ms_win_core_io_LIB, SetLastError = true)]
+    internal static partial uint CancelIoEx(SafeHandle handle, SafeNativeOverlapped overlapped);
+
+    internal unsafe delegate uint HttpGetRequestPropertyInvoker(SafeHandle requestQueueHandle, ulong requestId, HTTP_REQUEST_PROPERTY propertyId,
+        void* qualifier, uint qualifierSize, void* output, uint outputSize, IntPtr bytesReturned, IntPtr overlapped);
+
+    internal unsafe delegate uint HttpSetRequestPropertyInvoker(SafeHandle requestQueueHandle, ulong requestId, HTTP_REQUEST_PROPERTY propertyId,
+        void* input, uint inputSize, IntPtr overlapped);
+
+    // HTTP_PROPERTY_FLAGS.Present (1)
+    internal static HTTP_PROPERTY_FLAGS HTTP_PROPERTY_FLAGS_PRESENT { get; } = new() { _bitfield = 0x00000001 };
+    // This property is used by HttpListener to pass the version structure to the native layer in API calls.
+    internal static HTTPAPI_VERSION Version { get; } = new () { HttpApiMajorVersion = 2 };
+    internal static SafeLibraryHandle? HttpApiModule { get; }
+
+    private static HttpGetRequestPropertyInvoker? HttpGetRequestInvoker { get; }
+    private static HttpSetRequestPropertyInvoker? HttpSetRequestInvoker { get; }
+
+    internal static bool HttpGetRequestPropertySupported => HttpGetRequestInvoker is not null;
+    internal static bool HttpSetRequestPropertySupported => HttpSetRequestInvoker is not null;
+
+    internal static unsafe uint HttpGetRequestProperty(SafeHandle requestQueueHandle, ulong requestId, HTTP_REQUEST_PROPERTY propertyId,
+        void* qualifier, uint qualifierSize, void* output, uint outputSize, IntPtr bytesReturned, IntPtr overlapped)
     {
-        private const string HTTPAPI = "httpapi.dll";
+        return HttpGetRequestInvoker!(requestQueueHandle, requestId, propertyId, qualifier, qualifierSize, output, outputSize, bytesReturned, overlapped);
+    }
 
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpInitialize(HTTPAPI_VERSION version, uint flags, void* pReserved);
+    internal static unsafe uint HttpSetRequestProperty(SafeHandle requestQueueHandle, ulong requestId, HTTP_REQUEST_PROPERTY propertyId,
+        void* input, uint inputSize, IntPtr overlapped)
+    {
+        return HttpSetRequestInvoker!(requestQueueHandle, requestId, propertyId, input, inputSize, overlapped);
+    }
 
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpReceiveRequestEntityBody(SafeHandle requestQueueHandle, ulong requestId, uint flags, IntPtr pEntityBuffer, uint entityBufferLength, out uint bytesReturned, SafeNativeOverlapped pOverlapped);
+    [MemberNotNullWhen(true, nameof(HttpSetRequestInvoker))]
+    internal static bool SupportsTrailers { get; }
+    [MemberNotNullWhen(true, nameof(HttpSetRequestInvoker))]
+    internal static bool SupportsReset { get; }
+    internal static bool SupportsDelegation { get; }
+    internal static bool SupportsClientHello { get; }
+    internal static bool SupportsQueryTlsCipherInfo { get; }
+    internal static bool Supported { get; }
+    internal static uint HttpInitializeStatusCode { get; }
 
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpReceiveClientCertificate(SafeHandle requestQueueHandle, ulong connectionId, uint flags, HTTP_SSL_CLIENT_CERT_INFO* pSslClientCertInfo, uint sslClientCertInfoSize, uint* pBytesReceived, SafeNativeOverlapped pOverlapped);
+    static unsafe HttpApi()
+    {
+        var statusCode = PInvoke.HttpInitialize(Version, HTTP_INITIALIZE.HTTP_INITIALIZE_SERVER | HTTP_INITIALIZE.HTTP_INITIALIZE_CONFIG);
+        HttpInitializeStatusCode = statusCode;
 
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpReceiveClientCertificate(SafeHandle requestQueueHandle, ulong connectionId, uint flags, byte* pSslClientCertInfo, uint sslClientCertInfoSize, uint* pBytesReceived, SafeNativeOverlapped pOverlapped);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpReceiveHttpRequest(SafeHandle requestQueueHandle, ulong requestId, uint flags, HTTP_REQUEST* pRequestBuffer, uint requestBufferLength, uint* pBytesReturned, SafeNativeOverlapped pOverlapped);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpSendHttpResponse(SafeHandle requestQueueHandle, ulong requestId, uint flags, HTTP_RESPONSE_V2* pHttpResponse, HTTP_CACHE_POLICY* pCachePolicy, uint* pBytesSent, IntPtr pReserved1, uint Reserved2, SafeNativeOverlapped pOverlapped, IntPtr pLogData);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpSendResponseEntityBody(SafeHandle requestQueueHandle, ulong requestId, uint flags, ushort entityChunkCount, HTTP_DATA_CHUNK* pEntityChunks, uint* pBytesSent, IntPtr pReserved1, uint Reserved2, SafeNativeOverlapped pOverlapped, IntPtr pLogData);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpCancelHttpRequest(SafeHandle requestQueueHandle, ulong requestId, IntPtr pOverlapped);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpWaitForDisconnectEx(SafeHandle requestQueueHandle, ulong connectionId, uint reserved, SafeNativeOverlapped overlapped);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpCreateServerSession(HTTPAPI_VERSION version, ulong* serverSessionId, uint reserved);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpCreateUrlGroup(ulong serverSessionId, ulong* urlGroupId, uint reserved);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode, SetLastError = true)]
-        internal static extern uint HttpAddUrlToUrlGroup(ulong urlGroupId, string pFullyQualifiedUrl, ulong context, uint pReserved);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpSetUrlGroupProperty(ulong urlGroupId, HTTP_SERVER_PROPERTY serverProperty, IntPtr pPropertyInfo, uint propertyInfoLength);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode, SetLastError = true)]
-        internal static extern uint HttpRemoveUrlFromUrlGroup(ulong urlGroupId, string pFullyQualifiedUrl, uint flags);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpCloseServerSession(ulong serverSessionId);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpCloseUrlGroup(ulong urlGroupId);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern uint HttpSetRequestQueueProperty(SafeHandle requestQueueHandle, HTTP_SERVER_PROPERTY serverProperty, IntPtr pPropertyInfo, uint propertyInfoLength, uint reserved, IntPtr pReserved);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode, SetLastError = true)]
-        internal static extern unsafe uint HttpCreateRequestQueue(HTTPAPI_VERSION version, string pName,
-            UnsafeNclNativeMethods.SECURITY_ATTRIBUTES pSecurityAttributes, HTTP_CREATE_REQUEST_QUEUE_FLAG flags, out HttpRequestQueueV2Handle pReqQueueHandle);
-
-        [DllImport(HTTPAPI, ExactSpelling = true, CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-        internal static extern unsafe uint HttpCloseRequestQueue(IntPtr pReqQueueHandle);
-
-        internal delegate uint HttpSetRequestPropertyInvoker(SafeHandle requestQueueHandle, ulong requestId, HTTP_REQUEST_PROPERTY propertyId, void* input, uint inputSize, IntPtr overlapped);
-
-        private static HTTPAPI_VERSION version;
-
-        // This property is used by HttpListener to pass the version structure to the native layer in API
-        // calls. 
-
-        internal static HTTPAPI_VERSION Version
+        if (statusCode == ErrorCodes.ERROR_SUCCESS)
         {
-            get
-            {
-                return version;
-            }
+            Supported = true;
+            HttpApiModule = SafeLibraryHandle.Open(HTTPAPI);
+            HttpGetRequestInvoker = HttpApiModule.GetProcAddress<HttpGetRequestPropertyInvoker>("HttpQueryRequestProperty", throwIfNotFound: false);
+            HttpSetRequestInvoker = HttpApiModule.GetProcAddress<HttpSetRequestPropertyInvoker>("HttpSetRequestProperty", throwIfNotFound: false);
+            SupportsReset = HttpSetRequestPropertySupported;
+            SupportsTrailers = IsFeatureSupported(HTTP_FEATURE_ID.HttpFeatureResponseTrailers);
+            SupportsDelegation = IsFeatureSupported(HTTP_FEATURE_ID.HttpFeatureDelegateEx);
+            SupportsClientHello = IsFeatureSupported(HTTP_FEATURE_ID.HttpFeatureCacheTlsClientHello) && HttpGetRequestPropertySupported;
+            SupportsQueryTlsCipherInfo = IsFeatureSupported(HTTP_FEATURE_ID.HttpFeatureQueryCipherInfo) && HttpGetRequestPropertySupported;
         }
+    }
 
-        // This property is used by HttpListener to get the Api version in use so that it uses appropriate 
-        // Http APIs.
-
-        internal static HTTP_API_VERSION ApiVersion
+    private static bool IsFeatureSupported(HTTP_FEATURE_ID feature)
+    {
+        try
         {
-            get
-            {
-                if (version.HttpApiMajorVersion == 2 && version.HttpApiMinorVersion == 0)
-                {
-                    return HTTP_API_VERSION.Version20;
-                }
-                else if (version.HttpApiMajorVersion == 1 && version.HttpApiMinorVersion == 0)
-                {
-                    return HTTP_API_VERSION.Version10;
-                }
-                else
-                {
-                    return HTTP_API_VERSION.Invalid;
-                }
-            }
+            return PInvoke.HttpIsFeatureSupported(feature);
         }
+        catch (EntryPointNotFoundException) { }
 
-        internal static SafeLibraryHandle HttpApiModule { get; private set; }
-        internal static HttpSetRequestPropertyInvoker HttpSetRequestProperty { get; private set; }
-        internal static bool SupportsTrailers { get; private set; }
-        internal static bool SupportsReset { get; private set; }
-
-        static HttpApi()
-        {
-            InitHttpApi(2, 0);
-        }
-
-        private static void InitHttpApi(ushort majorVersion, ushort minorVersion)
-        {
-            version.HttpApiMajorVersion = majorVersion;
-            version.HttpApiMinorVersion = minorVersion;
-
-            var statusCode = HttpInitialize(version, (uint)HTTP_FLAGS.HTTP_INITIALIZE_SERVER, null);
-
-            supported = statusCode == UnsafeNclNativeMethods.ErrorCodes.ERROR_SUCCESS;
-
-            if (supported)
-            {
-                HttpApiModule = SafeLibraryHandle.Open(HTTPAPI);
-                HttpSetRequestProperty = HttpApiModule.GetProcAddress<HttpSetRequestPropertyInvoker>("HttpSetRequestProperty", throwIfNotFound: false);
-
-                SupportsReset = HttpSetRequestProperty != null;
-                // Trailers support was added in the same release as Reset, but there's no method we can export to check it directly.
-                SupportsTrailers = SupportsReset;
-            }
-        }
-
-        private static volatile bool supported;
-        internal static bool Supported
-        {
-            get
-            {
-                return supported;
-            }
-        }
+        return false;
     }
 }

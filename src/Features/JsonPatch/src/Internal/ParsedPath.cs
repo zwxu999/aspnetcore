@@ -1,96 +1,86 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using Microsoft.AspNetCore.JsonPatch.Exceptions;
 using System;
 using System.Collections.Generic;
-using System.Text;
+using Microsoft.AspNetCore.JsonPatch.Exceptions;
+using Microsoft.AspNetCore.Shared;
 
-namespace Microsoft.AspNetCore.JsonPatch.Internal
+namespace Microsoft.AspNetCore.JsonPatch.Internal;
+
+/// <summary>
+/// This API supports infrastructure and is not intended to be used
+/// directly from your code. This API may change or be removed in future releases.
+/// </summary>
+public readonly struct ParsedPath
 {
-    /// <summary>
-    /// This API supports infrastructure and is not intended to be used
-    /// directly from your code. This API may change or be removed in future releases.
-    /// </summary>
-    public readonly struct ParsedPath
+    private readonly string[] _segments;
+
+    public ParsedPath(string path)
     {
-        private static readonly string[] Empty = null;
+        ArgumentNullThrowHelper.ThrowIfNull(path);
 
-        private readonly string[] _segments;
+        _segments = ParsePath(PathHelpers.NormalizePath(path));
+    }
 
-        public ParsedPath(string path)
+    public string LastSegment
+    {
+        get
         {
-            if (path == null)
+            if (_segments == null || _segments.Length == 0)
             {
-                throw new ArgumentNullException(nameof(path));
+                return null;
             }
 
-            _segments = ParsePath(path);
+            return _segments[_segments.Length - 1];
+        }
+    }
+
+    public IReadOnlyList<string> Segments => _segments;
+
+    private static string[] ParsePath(string path)
+    {
+        if (path.Length == 0)
+        {
+            return Array.Empty<string>();
         }
 
-        public string LastSegment
+        if (path[0] != '/')
         {
-            get
-            {
-                if (_segments == null || _segments.Length == 0)
-                {
-                    return null;
-                }
+            // This shouldn't be reachable as the constructor enforces it.
+            // But added to clarify and ensure that the Slice call below is always safe.
+            throw new JsonPatchException(Resources.FormatInvalidValueForPath(path), null);
+        }
 
-                return _segments[_segments.Length - 1];
+        // When we have a path like "/a/b/c//d/e", the expectation is
+        // to have the segments be ["a", "b", "c", "", "d", "e"].
+        // So, before splitting on "/", we want to slice off the leading "/".
+        // Without this slice, we will always have an extra empty string at the beginning.
+        var referenceTokens = path.Substring(1).Split('/');
+
+        for (int i = 0; i < referenceTokens.Length; i++)
+        {
+            referenceTokens[i] = ValidateAndUnescapeReferenceToken(referenceTokens[i]);
+        }
+
+        return referenceTokens;
+    }
+
+    private static string ValidateAndUnescapeReferenceToken(string referenceToken)
+    {
+        var hasTilde = false;
+        for (int i = 0; i < referenceToken.Length; i++)
+        {
+            if (referenceToken[i] == '~')
+            {
+                hasTilde = true;
+                if (i + 1 >= referenceToken.Length || (referenceToken[i + 1] != '0' && referenceToken[i + 1] != '1'))
+                {
+                    throw new JsonPatchException(Resources.FormatInvalidValueForPath(referenceToken), null);
+                }
             }
         }
 
-        public IReadOnlyList<string> Segments => _segments ?? Empty;
-
-        private static string[] ParsePath(string path)
-        {
-            var strings = new List<string>();
-            var sb = new StringBuilder(path.Length);
-
-            for (var i = 0; i < path.Length; i++)
-            {
-                if (path[i] == '/')
-                {
-                    if (sb.Length > 0)
-                    {
-                        strings.Add(sb.ToString());
-                        sb.Length = 0;
-                    }
-                }
-                else if (path[i] == '~')
-                {
-                    ++i;
-                    if (i >= path.Length)
-                    {
-                        throw new JsonPatchException(Resources.FormatInvalidValueForPath(path), null);
-                    }
-
-                    if (path[i] == '0')
-                    {
-                        sb.Append('~');
-                    }
-                    else if (path[i] == '1')
-                    {
-                        sb.Append('/');
-                    }
-                    else
-                    {
-                        throw new JsonPatchException(Resources.FormatInvalidValueForPath(path), null);
-                    }
-                }
-                else
-                {
-                    sb.Append(path[i]);
-                }
-            }
-
-            if (sb.Length > 0)
-            {
-                strings.Add(sb.ToString());
-            }
-
-            return strings.ToArray();
-        }
+        return hasTilde ? referenceToken.Replace("~1", "/").Replace("~0", "~") : referenceToken;
     }
 }

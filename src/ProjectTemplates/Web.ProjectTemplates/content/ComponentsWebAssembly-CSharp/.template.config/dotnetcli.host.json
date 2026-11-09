@@ -1,18 +1,21 @@
 {
-  "$schema": "http://json.schemastore.org/dotnetcli.host",
+  "$schema": "https://json.schemastore.org/dotnetcli.host",
   "symbolInfo": {
     "skipRestore": {
       "longName": "no-restore",
       "shortName": ""
-    },
-    "Hosted": {
-      "longName": "hosted"
     },
     "PWA": {
       "longName": "pwa"
     },
     "Framework": {
       "longName": "framework"
+    },
+    "Empty": {
+      "longName": "empty"
+    },
+    "IncludeSampleContent": {
+      "isHidden": true
     },
     "UseLocalDB": {
       "longName": "use-local-db"
@@ -61,10 +64,16 @@
       "longName": "authority",
       "shortName": ""
     },
-    "HttpPort": {
+    "kestrelHttpPort": {
       "isHidden": true
     },
-    "HttpsPort": {
+    "kestrelHttpsPort": {
+      "isHidden": true
+    },
+    "iisHttpPort": {
+      "isHidden": true
+    },
+    "iisHttpsPort": {
       "isHidden": true
     },
     "ExcludeLaunchSettings": {
@@ -76,6 +85,22 @@
     },
     "NoHttps": {
       "longName": "no-https",
+      "shortName": ""
+    },
+    "CalledApiUrl": {
+      "longName": "called-api-url",
+      "shortName": ""
+    },
+    "CalledApiScopes": {
+      "longName": "called-api-scopes",
+      "shortName": ""
+    },
+    "CallsMicrosoftGraph": {
+      "longName": "calls-graph",
+      "shortName": ""
+    },
+    "UseProgramMain": {
+      "longName": "use-program-main",
       "shortName": ""
     }
   }

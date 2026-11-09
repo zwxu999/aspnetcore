@@ -1,12 +1,19 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System.Collections.Generic;
+using Microsoft.AspNetCore.SignalR.Internal;
 
-namespace Microsoft.AspNetCore.SignalR
+namespace Microsoft.AspNetCore.SignalR;
+
+/// <summary>
+/// An abstraction that provides access to client connections.
+/// </summary>
+public interface IHubClients : IHubClients<IClientProxy>
 {
     /// <summary>
-    /// An abstraction that provides access to client connections.
+    /// Gets a proxy that can be used to invoke methods on a single client connected to the hub and receive results.
     /// </summary>
-    public interface IHubClients : IHubClients<IClientProxy> { }
+    /// <param name="connectionId">The connection ID.</param>
+    /// <returns>A client caller.</returns>
+    new ISingleClientProxy Client(string connectionId) => new NonInvokingSingleClientProxy(((IHubClients<IClientProxy>)this).Client(connectionId), "IHubClients.Client(string connectionId)");
 }

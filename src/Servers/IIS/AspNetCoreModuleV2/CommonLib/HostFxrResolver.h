@@ -8,8 +8,8 @@
 #include <filesystem>
 #include <optional>
 #include <string>
-
 #include "ErrorContext.h"
+#include "ProcessorArchitecture.h"
 
 #define READ_BUFFER_SIZE 4096
 
@@ -32,7 +32,7 @@ public:
     static
     void
     AppendArguments(
-        const std::wstring          &arugments,
+        const std::wstring          &applicationArguments,
         const std::filesystem::path &applicationPhysicalPath,
         std::vector<std::wstring>   &arguments,
         bool                        expandDllPaths = false
@@ -44,28 +44,23 @@ public:
 private:
 
     static
-    BOOL
+    bool
     IsDotnetExecutable(
         const std::filesystem::path & dotnetPath
     );
 
     static
-    VOID
-    FindDotNetFolders(
-        const std::filesystem::path& path,
-        std::vector<std::wstring> & pvFolders
-    );
-
-    static
-    std::wstring
-    FindHighestDotNetVersion(
-        std::vector<std::wstring> & vFolders
+    bool
+    TryGetHostFxrPath(
+        std::filesystem::path& hostFxrDllPath,
+        const std::filesystem::path& dotnetRoot,
+        const std::filesystem::path& applicationPath
     );
 
     static
     std::filesystem::path
-    GetAbsolutePathToHostFxr(
-        const std::filesystem::path & dotnetPath
+    GetAbsolutePathToDotnetFromHostfxr(
+        const std::filesystem::path& hostfxrPath
     );
 
     static
@@ -78,6 +73,8 @@ private:
         const std::filesystem::path & applicationPath,
         const std::filesystem::path & requestedPath
     );
+
+    static ProcessorArchitecture GetFileProcessorArchitecture(const WCHAR* binaryPath);
 
     struct LocalFreeDeleter
     {

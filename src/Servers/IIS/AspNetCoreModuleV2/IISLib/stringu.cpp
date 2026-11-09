@@ -4,12 +4,8 @@
 
 #include "precomp.h"
 
-#pragma warning( push )
-#pragma warning ( disable : 4267 ALL_CODE_ANALYSIS_WARNINGS )
-
-STRU::STRU(
-    VOID
-) : m_cchLen( 0 )
+STRU::STRU()
+    : m_cchLen( 0 )
 {
     *(QueryStr()) = L'\0';
 }
@@ -38,14 +34,13 @@ STRU::STRU(
 --*/
 {
     _ASSERTE( cchInit <= (MAXDWORD / sizeof( WCHAR )) );
-    _ASSERTE( NULL != pbInit );
+    _ASSERTE(nullptr != pbInit );
     _ASSERTE(cchInit > 0 );
     _ASSERTE(pbInit[0] == L'\0');
 }
 
 BOOL
 STRU::IsEmpty(
-    VOID
 ) const
 {
     return ( m_cchLen == 0 );
@@ -53,7 +48,6 @@ STRU::IsEmpty(
 
 DWORD
 STRU::QueryCB(
-    VOID
 ) const
 //
 // Returns the number of bytes in the string excluding the terminating NULL
@@ -64,7 +58,6 @@ STRU::QueryCB(
 
 DWORD
 STRU::QueryCCH(
-    VOID
 ) const
 //
 //  Returns the number of characters in the string excluding the terminating NULL
@@ -75,7 +68,6 @@ STRU::QueryCCH(
 
 DWORD
 STRU::QuerySizeCCH(
-    VOID
 ) const
 //
 // Returns size of the underlying storage buffer, in characters
@@ -88,7 +80,6 @@ __nullterminated
 __ecount(this->m_cchLen)
 WCHAR*
 STRU::QueryStr(
-    VOID
 ) const
 //
 //  Return the string buffer
@@ -99,13 +90,12 @@ STRU::QueryStr(
 
 VOID
 STRU::Reset(
-    VOID
 )
 //
 // Resets the internal string to be NULL string. Buffer remains cached.
 //
 {
-    _ASSERTE( QueryStr() != NULL );
+    _ASSERTE(QueryStr() != nullptr);
     *(QueryStr()) = L'\0';
     m_cchLen = 0;
 }
@@ -130,18 +120,16 @@ STRU::Resize(
 
 HRESULT
 STRU::SyncWithBuffer(
-    VOID
 )
 //
 // Recalculate the length of the string, etc. because we've modified
 // the buffer directly.
 //
 {
-    HRESULT hr;
     size_t size;
-    hr = StringCchLengthW( QueryStr(),
-                           QuerySizeCCH(),
-                           &size );
+    HRESULT hr = StringCchLengthW(QueryStr(),
+                                  QuerySizeCCH(),
+                                  &size);
     if ( SUCCEEDED( hr ) )
     {
         m_cchLen = static_cast<DWORD>(size);
@@ -154,12 +142,11 @@ STRU::Copy(
     __in PCWSTR pszCopy
 )
 {
-    HRESULT hr;
     size_t  cbStr;
 
-    hr = StringCchLengthW( pszCopy,
-                          STRSAFE_MAX_CCH,
-                          &cbStr );
+    HRESULT hr = StringCchLengthW(pszCopy,
+                                  STRSAFE_MAX_CCH,
+                                  &cbStr);
     if ( FAILED( hr ) )
     {
         return hr;
@@ -190,7 +177,7 @@ STRU::Copy(
     __in const STRU * pstrRhs
 )
 {
-    _ASSERTE( NULL != pstrRhs );
+    _ASSERTE(nullptr != pstrRhs);
     return Copy( pstrRhs->QueryStr(), pstrRhs->QueryCCH() );
 }
 
@@ -208,19 +195,18 @@ STRU::CopyAndExpandEnvironmentStrings(
 )
 {
     HRESULT hr = S_OK;
-    DWORD   cchDestReqBuff = 0;
 
     Reset();
 
-    cchDestReqBuff = ExpandEnvironmentStringsW( pszSource,
-                                                QueryStr(),
-                                                QuerySizeCCH() );
+    DWORD cchDestReqBuff = ExpandEnvironmentStringsW(pszSource,
+                                                     QueryStr(),
+                                                     QuerySizeCCH());
     if ( cchDestReqBuff == 0 )
     {
         hr = HRESULT_FROM_WIN32( GetLastError() );
         goto Finished;
     }
-    else if ( cchDestReqBuff > QuerySizeCCH() )
+    if ( cchDestReqBuff > QuerySizeCCH() )
     {
         hr = Resize( cchDestReqBuff );
         if ( FAILED( hr ) )
@@ -257,12 +243,11 @@ STRU::CopyA(
     __in PCSTR  pszCopyA
 )
 {
-    HRESULT hr;
     size_t  cbStr;
 
-    hr = StringCbLengthA( pszCopyA,
-                          STRSAFE_MAX_CCH,
-                          &cbStr );
+    HRESULT hr = StringCbLengthA(pszCopyA,
+                                 STRSAFE_MAX_CCH,
+                                 &cbStr);
     if ( FAILED( hr ) )
     {
         return hr;
@@ -294,12 +279,11 @@ STRU::Append(
     __in PCWSTR  pszAppend
 )
 {
-    HRESULT hr;
     size_t  cbStr;
 
-    hr = StringCchLengthW( pszAppend,
-                           STRSAFE_MAX_CCH,
-                           &cbStr );
+    HRESULT hr = StringCchLengthW(pszAppend,
+                                  STRSAFE_MAX_CCH,
+                                  &cbStr);
     if ( FAILED( hr ) )
     {
         return hr;
@@ -334,7 +318,7 @@ STRU::Append(
     __in const STRU * pstrRhs
 )
 {
-    _ASSERTE( NULL != pstrRhs );
+    _ASSERTE(nullptr != pstrRhs);
     return Append( pstrRhs->QueryStr(), pstrRhs->QueryCCH() );
 }
 
@@ -351,12 +335,11 @@ STRU::AppendA(
     __in PCSTR  pszAppendA
 )
 {
-    HRESULT hr;
     size_t  cbStr;
 
-    hr = StringCbLengthA( pszAppendA,
-                          STRSAFE_MAX_CCH,
-                          &cbStr );
+    HRESULT hr = StringCbLengthA(pszAppendA,
+                                 STRSAFE_MAX_CCH,
+                                 &cbStr);
     if ( FAILED( hr ) )
     {
         return hr;
@@ -396,8 +379,8 @@ STRU::CopyToBuffer(
 // Makes a copy of the stored string into the given buffer
 //
 {
-    _ASSERTE( NULL != pszBuffer );
-    _ASSERTE( NULL != pcb );
+    _ASSERTE(nullptr != pszBuffer);
+    _ASSERTE(nullptr != pcb);
 
     HRESULT hr          = S_OK;
     DWORD   cbNeeded    = QueryCB() + sizeof( WCHAR );
@@ -474,13 +457,16 @@ Return Value:
 
 --*/
 {
-    HRESULT     hr = S_OK;
     va_list     argsList;
     va_start(   argsList, pwszFormatString );
 
-    hr = SafeVsnwprintf(pwszFormatString, argsList);
+    HRESULT hr = SafeVsnwprintf(pwszFormatString, argsList);
 
+#pragma warning(push)
+#pragma warning(disable: 26477) // va_end uses 0
     va_end( argsList );
+#pragma warning(pop)
+
     return hr;
 }
 
@@ -507,27 +493,25 @@ Return Value:
 --*/
 {
     HRESULT     hr = S_OK;
-    int         cchOutput;
-    int         cchNeeded;
 
     //
     // Format the incoming message using vsnprintf()
     // so that the overflows are captured
     //
-    cchOutput = _vsnwprintf_s(
-            QueryStr(),
-            QuerySizeCCH(),
-            QuerySizeCCH() - 1,
-            pwszFormatString,
-            argsList
-        );
+    int cchOutput = _vsnwprintf_s(
+        QueryStr(),
+        QuerySizeCCH(),
+        QuerySizeCCH() - 1,
+        pwszFormatString,
+        argsList
+    );
 
     if( cchOutput == -1 )
     {
         //
         // Couldn't fit this in the original STRU size.
         //
-        cchNeeded = _vscwprintf( pwszFormatString, argsList );
+        int cchNeeded = _vscwprintf(pwszFormatString, argsList);
         if( cchNeeded > 64 * 1024 )
         {
             //
@@ -626,8 +610,8 @@ Return Value:
     //
     for ( SIZE_T i = 0; i < cNumStrings; i++ )
     {
-        _ASSERTE( rgpszStrings[ i ] != NULL );
-        if ( NULL == rgpszStrings[ i ] )
+        _ASSERTE( rgpszStrings[ i ] != nullptr );
+        if ( nullptr == rgpszStrings[ i ] )
         {
             return E_INVALIDARG;
         }
@@ -716,7 +700,7 @@ Return Value:
 
 --*/
 {
-    _ASSERTE( NULL != pStr );
+    _ASSERTE( nullptr != pStr );
     _ASSERTE( 0 == cbStr % sizeof( WCHAR ) );
     _ASSERTE( cbOffset <= QueryCB() );
     _ASSERTE( 0 == cbOffset % sizeof( WCHAR ) );
@@ -772,15 +756,11 @@ Return Value:
 
 --*/
 {
-    WCHAR*  pszBuffer;
-    DWORD   cchBuffer;
-    DWORD   cchCharsCopied = 0;
-
-    _ASSERTE( NULL != pStr );
+    _ASSERTE( nullptr != pStr );
     _ASSERTE( cbOffset <= QueryCB() );
     _ASSERTE( 0 == cbOffset % sizeof( WCHAR ) );
 
-    if ( NULL == pStr )
+    if ( nullptr == pStr )
     {
         return E_INVALIDARG;
     }
@@ -794,9 +774,9 @@ Return Value:
     //  Only resize when we have to.  When we do resize, we tack on
     //  some extra space to avoid extra reallocations.
     //
-    if( m_Buff.QuerySize() < (ULONGLONG)cbOffset + (cbStr * sizeof( WCHAR )) + sizeof(WCHAR) )
+    if (m_Buff.QuerySize() < (ULONGLONG)cbOffset + (cbStr * sizeof(WCHAR)) + sizeof(WCHAR))
     {
-        ULONGLONG cb64NewSize = (ULONGLONG)( cbOffset + cbStr * sizeof(WCHAR) + sizeof( WCHAR ) );
+        ULONGLONG cb64NewSize = (ULONGLONG)cbOffset + (ULONGLONG)cbStr * sizeof(WCHAR) + sizeof(WCHAR);
 
         //
         // Check for the arithmetic overflow
@@ -812,10 +792,10 @@ Return Value:
         }
     }
 
-    pszBuffer = reinterpret_cast<WCHAR*>(reinterpret_cast<BYTE*>(m_Buff.QueryPtr()) + cbOffset);
-    cchBuffer = ( m_Buff.QuerySize() - cbOffset - sizeof( WCHAR ) ) / sizeof( WCHAR );
+    WCHAR* pszBuffer = reinterpret_cast<WCHAR*>(reinterpret_cast<BYTE*>(m_Buff.QueryPtr()) + cbOffset);
+    DWORD cchBuffer = (m_Buff.QuerySize() - cbOffset - sizeof(WCHAR)) / sizeof(WCHAR);
 
-    cchCharsCopied = MultiByteToWideChar(
+    DWORD cchCharsCopied = MultiByteToWideChar(
         CodePage,
         MB_ERR_INVALID_CHARS,
         pStr,
@@ -861,7 +841,6 @@ STRU::Trim()
     PWSTR               pwszString              = QueryStr();
     DWORD               cchNewLength            = m_cchLen;
     DWORD               cchLeadingWhitespace    = 0;
-    DWORD               cchTempLength           = 0;
 
     for (LONG ixString = m_cchLen - 1; ixString >= 0; ixString--)
     {
@@ -876,7 +855,7 @@ STRU::Trim()
         }
     }
 
-    cchTempLength = cchNewLength;
+    DWORD cchTempLength = cchNewLength;
     for (DWORD ixString = 0; ixString < cchTempLength; ixString++)
     {
         if (iswspace(pwszString[ixString]) != 0)
@@ -926,51 +905,38 @@ STRU::StartsWith(
     __in PCWSTR         pwszPrefix,
     __in bool           fIgnoreCase) const
 {
-    HRESULT hr          = S_OK;
-    BOOL    fMatch      = FALSE;
-    size_t  cchPrefix   = 0;
-
-    if (pwszPrefix == NULL)
+    if (pwszPrefix == nullptr)
     {
-        goto Finished;
+        return FALSE;
     }
 
-    hr = StringCchLengthW( pwszPrefix,
-                           STRSAFE_MAX_CCH,
-                           &cchPrefix );
+    size_t  cchPrefix = 0;
+    HRESULT hr = StringCchLengthW(pwszPrefix, STRSAFE_MAX_CCH, &cchPrefix);
     if (FAILED(hr))
     {
-        goto Finished;
+        return FALSE;
     }
 
-    _ASSERTE( cchPrefix <= MAXDWORD );
-
+    _ASSERTE(cchPrefix <= MAXDWORD);
     if (cchPrefix > m_cchLen)
     {
-        goto Finished;
+        return FALSE;
     }
 
-    #if defined( NTDDI_VERSION ) && NTDDI_VERSION >= NTDDI_LONGHORN
+    if (cchPrefix > MAXINT)
+    {
+        return FALSE;
+    }
 
-        fMatch = ( CSTR_EQUAL == CompareStringOrdinal( QueryStr(),
-                                                       cchPrefix,
-                                                       pwszPrefix,
-                                                       cchPrefix,
-                                                       fIgnoreCase ) );
-    #else
+    int cchPrefixInt = static_cast<int>(cchPrefix);
 
-        if( fIgnoreCase )
-        {
-            fMatch = ( 0 == _wcsnicmp( QueryStr(), pwszPrefix, cchPrefix ) );
-        }
-        else
-        {
-            fMatch = ( 0 == wcsncmp( QueryStr(), pwszPrefix, cchPrefix ) );
-        }
-
-    #endif
-
-Finished:
+    BOOL fMatch = FALSE;
+    fMatch = (CSTR_EQUAL == CompareStringOrdinal(
+        QueryStr(),
+        cchPrefixInt,
+        pwszPrefix,
+        cchPrefixInt,
+        fIgnoreCase));
 
     return fMatch;
 }
@@ -998,56 +964,43 @@ STRU::EndsWith(
     __in PCWSTR         pwszSuffix,
     __in bool           fIgnoreCase) const
 {
-    HRESULT     hr          = S_OK;
     PWSTR       pwszString  = QueryStr();
-    BOOL        fMatch      = FALSE;
     size_t      cchSuffix   = 0;
-    ptrdiff_t   ixOffset    = 0;
 
-    if (pwszSuffix == NULL)
+    if (pwszSuffix == nullptr)
     {
-        goto Finished;
+        return FALSE;
     }
 
-    hr = StringCchLengthW( pwszSuffix,
-                           STRSAFE_MAX_CCH,
-                           &cchSuffix );
+    HRESULT hr = StringCchLengthW(pwszSuffix, STRSAFE_MAX_CCH, &cchSuffix);
     if (FAILED(hr))
     {
-        goto Finished;
+        return FALSE;
     }
 
-    _ASSERTE( cchSuffix <= MAXDWORD );
-
+    _ASSERTE(cchSuffix <= MAXDWORD);
     if (cchSuffix > m_cchLen)
     {
-        goto Finished;
+        return FALSE;
     }
 
-    ixOffset = m_cchLen - cchSuffix;
+    if (cchSuffix > MAXINT)
+    {
+        return FALSE;
+    }
+
+    int cchSuffixInt = static_cast<int>(cchSuffix);
+
+    ptrdiff_t ixOffset = m_cchLen - cchSuffix;
     _ASSERTE(ixOffset >= 0 && ixOffset <= MAXDWORD);
 
-    #if defined( NTDDI_VERSION ) && NTDDI_VERSION >= NTDDI_LONGHORN
-
-        fMatch = ( CSTR_EQUAL == CompareStringOrdinal( pwszString + ixOffset,
-                                                       cchSuffix,
-                                                       pwszSuffix,
-                                                       cchSuffix,
-                                                       fIgnoreCase ) );
-    #else
-
-        if( fIgnoreCase )
-        {
-            fMatch = ( 0 == _wcsnicmp( pwszString + ixOffset, pwszSuffix, cchSuffix ) );
-        }
-        else
-        {
-            fMatch = ( 0 == wcsncmp( pwszString + ixOffset, pwszSuffix, cchSuffix ) );
-        }
-
-    #endif
-
-Finished:
+    BOOL fMatch = FALSE;
+    fMatch = (CSTR_EQUAL == CompareStringOrdinal(
+        pwszString + ixOffset,
+        cchSuffixInt,
+        pwszSuffix,
+        cchSuffixInt,
+        fIgnoreCase));
 
     return fMatch;
 }
@@ -1081,7 +1034,7 @@ STRU::IndexOf(
     // Make sure that there are no buffer overruns.
     if( dwStartIndex >= QueryCCH() )
     {
-        goto Finished;
+        return nIndex;
     }
 
     const WCHAR* pwChar = wcschr( QueryStr() + dwStartIndex, charValue );
@@ -1092,8 +1045,6 @@ STRU::IndexOf(
         // nIndex will be set to -1 on failure.
         (VOID)SizeTToInt( pwChar - QueryStr(), &nIndex );
     }
-
-Finished:
 
     return nIndex;
 }
@@ -1123,14 +1074,12 @@ STRU::IndexOf(
     __in DWORD          dwStartIndex
     ) const
 {
-    HRESULT hr = S_OK;
     INT nIndex = -1;
-    SIZE_T cchValue = 0;
 
     // Validate input parameters
     if( dwStartIndex >= QueryCCH() || !pwszValue )
     {
-        goto Finished;
+        return nIndex;
     }
 
     const WCHAR* pwChar = wcsstr( QueryStr() + dwStartIndex, pwszValue );
@@ -1141,8 +1090,6 @@ STRU::IndexOf(
         // nIndex will be set to -1 on failure.
         (VOID)SizeTToInt( pwChar - QueryStr(), &nIndex );
     }
-
-Finished:
 
     return nIndex;
 }
@@ -1177,7 +1124,7 @@ STRU::LastIndexOf(
     // Make sure that there are no buffer overruns.
     if( dwStartIndex >= QueryCCH() )
     {
-        goto Finished;
+        return nIndex;
     }
 
     const WCHAR* pwChar = wcsrchr( QueryStr() + dwStartIndex, charValue );
@@ -1189,69 +1136,5 @@ STRU::LastIndexOf(
         (VOID)SizeTToInt( pwChar - QueryStr(), &nIndex );
     }
 
-Finished:
-
     return nIndex;
 }
-
-//static
-HRESULT
-STRU::ExpandEnvironmentVariables(
-    __in  PCWSTR                  pszString,
-    __out STRU *                  pstrExpandedString
-    )
-/*++
-Routine Description:
-    Expand the environment variables in a string
-Arguments:
-    pszString - String with environment variables to expand
-    pstrExpandedString - Receives expanded string on success
-Return Value:
-    HRESULT
---*/
-{
-    HRESULT                 hr              = S_OK;
-    DWORD                   cchNewSize      = 0;
-    if ( pszString == NULL ||
-         pstrExpandedString == NULL )
-    {
-        DBG_ASSERT( FALSE );
-        hr = HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER );
-        goto Exit;
-    }
-    cchNewSize = ExpandEnvironmentStrings( pszString,
-                                           pstrExpandedString->QueryStr(),
-                                           pstrExpandedString->QuerySizeCCH() );
-    if ( cchNewSize == 0 )
-    {
-        hr = HRESULT_FROM_WIN32( GetLastError() );
-        goto Exit;
-    }
-    if ( cchNewSize > pstrExpandedString->QuerySizeCCH() )
-    {
-        hr = pstrExpandedString->Resize(
-            ( cchNewSize + 1 ) * sizeof( WCHAR )
-            );
-        if ( FAILED( hr ) )
-        {
-            goto Exit;
-        }
-        cchNewSize = ExpandEnvironmentStrings(
-            pszString,
-            pstrExpandedString->QueryStr(),
-            pstrExpandedString->QuerySizeCCH()
-            );
-        if ( cchNewSize == 0 ||
-             cchNewSize > pstrExpandedString->QuerySizeCCH() )
-        {
-            hr = HRESULT_FROM_WIN32( GetLastError() );
-            goto Exit;
-        }
-    }
-    pstrExpandedString->SyncWithBuffer();
-    hr = S_OK;
-Exit:
-    return hr;
-}
-
-#pragma warning( pop )

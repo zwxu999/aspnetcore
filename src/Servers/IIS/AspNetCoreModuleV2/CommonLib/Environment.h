@@ -5,6 +5,7 @@
 
 #include <string>
 #include <optional>
+#include "ProcessorArchitecture.h"
 
 class Environment
 {
@@ -22,5 +23,14 @@ public:
     std::wstring GetDllDirectoryValue();
     static
     bool IsRunning64BitProcess();
+    static
+    ProcessorArchitecture GetCurrentProcessArchitecture();
+    static
+    HRESULT CopyToDirectory(const std::wstring& source, const std::filesystem::path& destination, bool cleanDest, const std::filesystem::path& directoryToIgnore, int& copiedFileCount);
+    static
+    bool CheckUpToDate(const std::wstring& source, const std::filesystem::path& destination, const std::wstring& extension, const std::filesystem::path& directoryToIgnore);
+private:
+    static
+    void CopyToDirectoryInner(const std::filesystem::path& source_folder, const std::filesystem::path& target_folder, const std::filesystem::path& directoryToIgnore, int& copiedFileCount);
 };
 

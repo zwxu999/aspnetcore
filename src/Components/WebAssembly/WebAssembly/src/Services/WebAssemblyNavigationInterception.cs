@@ -1,20 +1,17 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Components.Routing;
-using Interop = Microsoft.AspNetCore.Components.Web.BrowserNavigationManagerInterop;
 
-namespace Microsoft.AspNetCore.Components.WebAssembly.Services
+namespace Microsoft.AspNetCore.Components.WebAssembly.Services;
+
+internal sealed class WebAssemblyNavigationInterception : INavigationInterception
 {
-    internal sealed class WebAssemblyNavigationInterception : INavigationInterception
-    {
-        public static readonly WebAssemblyNavigationInterception Instance = new WebAssemblyNavigationInterception();
+    public static readonly WebAssemblyNavigationInterception Instance = new WebAssemblyNavigationInterception();
 
-        public Task EnableNavigationInterceptionAsync()
-        {
-            DefaultWebAssemblyJSRuntime.Instance.Invoke<object>(Interop.EnableNavigationInterception);
-            return Task.CompletedTask;
-        }
+    public Task EnableNavigationInterceptionAsync()
+    {
+        InternalJSImportMethods.Instance.NavigationManager_EnableNavigationInterception((int)WebRendererId.WebAssembly);
+        return Task.CompletedTask;
     }
 }

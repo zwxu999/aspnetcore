@@ -1,41 +1,61 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Collections.Concurrent;
-using System.Linq;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Components.HotReload;
 
-namespace Microsoft.AspNetCore.Components.Authorization
+namespace Microsoft.AspNetCore.Components.Authorization;
+
+internal static class AttributeAuthorizeDataCache
 {
-    internal static class AttributeAuthorizeDataCache
+    static AttributeAuthorizeDataCache()
     {
-        private static ConcurrentDictionary<Type, IAuthorizeData[]> _cache
-            = new ConcurrentDictionary<Type, IAuthorizeData[]>();
-
-        public static IAuthorizeData[] GetAuthorizeDataForType(Type type)
+        if (HotReloadManager.IsSupported)
         {
-            IAuthorizeData[] result;
-            if (!_cache.TryGetValue(type, out result))
-            {
-                result = ComputeAuthorizeDataForType(type);
-                _cache[type] = result; // Safe race - doesn't matter if it overwrites
-            }
+            HotReloadManager.Default.OnDeltaApplied += ClearCache;
+        }
+    }
 
-            return result;
+    private static readonly ConcurrentDictionary<Type, (IAuthorizeData[]? AuthorizeData, object[]? Metadata)> _cache = new();
+
+    private static void ClearCache() => _cache.Clear();
+
+    public static IAuthorizeData[]? GetAuthorizeDataForType(Type type)
+        => GetAuthorizationDataForType(type).AuthorizeData;
+
+    public static object[]? GetAuthorizationMetadataForType(Type type)
+        => GetAuthorizationDataForType(type).Metadata;
+
+    private static (IAuthorizeData[]? AuthorizeData, object[]? Metadata) GetAuthorizationDataForType(Type type)
+    {
+        if (!_cache.TryGetValue(type, out var result))
+        {
+            result = ComputeAuthorizationDataForType(type);
+            _cache[type] = result; // Safe race - doesn't matter if it overwrites
         }
 
-        private static IAuthorizeData[] ComputeAuthorizeDataForType(Type type)
+        return result;
+    }
+
+    private static (IAuthorizeData[]? AuthorizeData, object[]? Metadata) ComputeAuthorizationDataForType(Type type)
+    {
+        var allAttributes = type.GetCustomAttributes(inherit: true);
+        List<IAuthorizeData>? authorizeDatas = null;
+        for (var i = 0; i < allAttributes.Length; i++)
         {
-            // Allow Anonymous skips all authorization
-            var allAttributes = type.GetCustomAttributes(inherit: true);
-            if (allAttributes.OfType<IAllowAnonymous>().Any())
+            if (allAttributes[i] is IAllowAnonymous)
             {
-                return null;
+                return (null, null);
             }
 
-            var authorizeDataAttributes = allAttributes.OfType<IAuthorizeData>().ToArray();
-            return authorizeDataAttributes.Length > 0 ? authorizeDataAttributes : null;
+            if (allAttributes[i] is IAuthorizeData authorizeData)
+            {
+                authorizeDatas ??= new();
+                authorizeDatas.Add(authorizeData);
+            }
         }
+
+        return (authorizeDatas?.ToArray(), allAttributes);
     }
 }

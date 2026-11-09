@@ -6,8 +6,8 @@
 .PARAMETER Force
     Force the script to run the MSI, even it it appears LocalDB is installed.
 .LINK
-    https://docs.microsoft.com/en-us/sql/database-engine/configure-windows/sql-server-2016-express-localdb?view=sql-server-2016
-    https://docs.microsoft.com/en-us/sql/database-engine/install-windows/install-sql-server-from-the-command-prompt?view=sql-server-2016
+    https://learn.microsoft.com/sql/database-engine/configure-windows/sql-server-2016-express-localdb?view=sql-server-2016
+    https://learn.microsoft.com/sql/database-engine/install-windows/install-sql-server-from-the-command-prompt?view=sql-server-2016
 #>
 param(
     [switch]$Force
@@ -31,7 +31,7 @@ $installerFilename = "SqlLocalDB.msi"
 $installerPath = "$intermedateDir\$installerFilename"
 Write-Host ""
 Write-Host "Downloading '$installerFilename' to '$installerPath'."
-& $PSScriptRoot\Download.ps1 'https://download.microsoft.com/download/9/0/7/907AD35F-9F9C-43A5-9789-52470555DB90/ENU/SqlLocalDB.msi' $installerPath
+& "$PSScriptRoot\..\Download.ps1" 'https://download.microsoft.com/download/9/0/7/907AD35F-9F9C-43A5-9789-52470555DB90/ENU/SqlLocalDB.msi' $installerPath
 
 # Install LocalDB.
 $arguments = '/package', "`"$installerPath`"", '/NoRestart', '/Passive', `

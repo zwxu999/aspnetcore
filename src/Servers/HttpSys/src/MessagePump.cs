@@ -1,13 +1,10 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
-using System.Collections.Generic;
-using System.Diagnostics.Contracts;
+using System.Diagnostics;
 using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http.Features;
@@ -15,271 +12,365 @@ using Microsoft.AspNetCore.HttpSys.Internal;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-namespace Microsoft.AspNetCore.Server.HttpSys
+namespace Microsoft.AspNetCore.Server.HttpSys;
+
+internal sealed partial class MessagePump : IServer, IServerDelegationFeature
 {
-    internal class MessagePump : IServer
+    private readonly ILogger _logger;
+    private readonly HttpSysOptions _options;
+
+    private readonly int _maxAccepts;
+
+    // Shutdown coordination - _acceptLoopCount and _acceptLoopsTcs protected by _shutdownLock
+    private readonly Lock _shutdownLock = new();
+    private volatile bool _stopping; // Volatile for lock-free reads in hot path
+    private int _acceptLoopCount;
+    private readonly TaskCompletionSource _acceptLoopsCompleted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private Task? _stopTask;
+
+    // Request counting - lock-free for performance (hot path)
+    private int _outstandingRequests;
+    private readonly TaskCompletionSource _requestsDrained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private readonly ServerAddressesFeature _serverAddresses;
+
+    public MessagePump(IOptions<HttpSysOptions> options, IMemoryPoolFactory<byte> memoryPoolFactory,
+        ILoggerFactory loggerFactory, IAuthenticationSchemeProvider authentication)
     {
-        private readonly ILogger _logger;
-        private readonly HttpSysOptions _options;
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+        _options = options.Value;
+        Listener = new HttpSysListener(_options, memoryPoolFactory, loggerFactory);
+        _logger = loggerFactory.CreateLogger<MessagePump>();
 
-        private int _maxAccepts;
-        private int _acceptorCounts;
-
-        private volatile int _stopping;
-        private int _outstandingRequests;
-        private readonly TaskCompletionSource<object> _shutdownSignal = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
-        private int _shutdownSignalCompleted;
-
-        private readonly ServerAddressesFeature _serverAddresses;
-
-        public MessagePump(IOptions<HttpSysOptions> options, ILoggerFactory loggerFactory, IAuthenticationSchemeProvider authentication)
+        if (_options.Authentication.Schemes != AuthenticationSchemes.None)
         {
-            if (options == null)
-            {
-                throw new ArgumentNullException(nameof(options));
-            }
-            if (loggerFactory == null)
-            {
-                throw new ArgumentNullException(nameof(loggerFactory));
-            }
-            _options = options.Value;
-            Listener = new HttpSysListener(_options, loggerFactory);
-            _logger = loggerFactory.CreateLogger<MessagePump>();
-
-            if (_options.Authentication.Schemes != AuthenticationSchemes.None)
-            {
-                authentication.AddScheme(new AuthenticationScheme(HttpSysDefaults.AuthenticationScheme, displayName: _options.Authentication.AuthenticationDisplayName, handlerType: typeof(AuthenticationHandler)));
-            }
-
-            Features = new FeatureCollection();
-            _serverAddresses = new ServerAddressesFeature();
-            Features.Set<IServerAddressesFeature>(_serverAddresses);
-
-            _maxAccepts = _options.MaxAccepts;
+            authentication.AddScheme(new AuthenticationScheme(HttpSysDefaults.AuthenticationScheme, displayName: _options.Authentication.AuthenticationDisplayName, handlerType: typeof(AuthenticationHandler)));
         }
 
-        internal HttpSysListener Listener { get; }
+        Features = new FeatureCollection();
+        _serverAddresses = new ServerAddressesFeature();
+        Features.Set<IServerAddressesFeature>(_serverAddresses);
 
-        internal IHttpApplication<object> Application { get; set; }
-
-        public IFeatureCollection Features { get; }
-
-        internal bool Stopping => _stopping == 1;
-
-        public Task StartAsync<TContext>(IHttpApplication<TContext> application, CancellationToken cancellationToken)
+        if (HttpApi.SupportsDelegation)
         {
-            if (application == null)
+            Features.Set<IServerDelegationFeature>(this);
+        }
+
+        _maxAccepts = _options.MaxAccepts;
+    }
+
+    internal HttpSysListener Listener { get; }
+
+    internal IRequestContextFactory? RequestContextFactory { get; set; }
+
+    public IFeatureCollection Features { get; }
+
+    internal bool Stopping => _stopping;
+
+    public Task StartAsync<TContext>(IHttpApplication<TContext> application, CancellationToken cancellationToken) where TContext : notnull
+    {
+        ArgumentNullException.ThrowIfNull(application);
+
+        var hostingUrlsPresent = _serverAddresses.Addresses.Count > 0;
+        var serverAddressCopy = _serverAddresses.Addresses.ToList();
+        _serverAddresses.Addresses.Clear();
+
+        if (_serverAddresses.PreferHostingUrls && hostingUrlsPresent)
+        {
+            if (_options.UrlPrefixes.Count > 0)
             {
-                throw new ArgumentNullException(nameof(application));
+                Log.ClearedPrefixes(_logger, _serverAddresses.Addresses);
+
+                Listener.Options.UrlPrefixes.Clear();
             }
 
-            var hostingUrlsPresent = _serverAddresses.Addresses.Count > 0;
-            var serverAddressCopy = _serverAddresses.Addresses.ToList();
-            _serverAddresses.Addresses.Clear();
-
-            if (_serverAddresses.PreferHostingUrls && hostingUrlsPresent)
+            UpdateUrlPrefixes(serverAddressCopy);
+        }
+        else if (_options.UrlPrefixes.Count > 0)
+        {
+            if (hostingUrlsPresent)
             {
-                if (_options.UrlPrefixes.Count > 0)
-                {
-                    _logger.LogWarning(LoggerEventIds.ClearedPrefixes, $"Overriding endpoints added to {nameof(HttpSysOptions.UrlPrefixes)} since {nameof(IServerAddressesFeature.PreferHostingUrls)} is set to true." +
-                        $" Binding to address(es) '{string.Join(", ", _serverAddresses.Addresses)}' instead. ");
+                Log.ClearedAddresses(_logger, _serverAddresses.Addresses);
 
-                    Listener.Options.UrlPrefixes.Clear();
+                _serverAddresses.Addresses.Clear();
+            }
+        }
+        else if (hostingUrlsPresent)
+        {
+            UpdateUrlPrefixes(serverAddressCopy);
+        }
+        else if (Listener.RequestQueue.Created)
+        {
+            Log.BindingToDefault(_logger);
+
+            Listener.Options.UrlPrefixes.Add(Constants.DefaultServerAddress);
+        }
+        // else // Attaching to an existing queue, don't add a default.
+
+        // Can't start twice
+        Debug.Assert(RequestContextFactory == null, "Start called twice!");
+
+        Debug.Assert(application != null);
+
+        RequestContextFactory = new ApplicationRequestContextFactory<TContext>(application, this);
+
+        Listener.Start();
+
+        // Update server addresses after we start listening as port 0
+        // needs to be selected at the point of binding.
+        foreach (var prefix in _options.UrlPrefixes)
+        {
+            _serverAddresses.Addresses.Add(prefix.FullPrefix);
+        }
+
+        // Dispatch to get off the SynchronizationContext and use UnsafeQueueUserWorkItem to avoid capturing the ExecutionContext
+        ThreadPool.UnsafeQueueUserWorkItem(state => state.ActivateRequestProcessingLimits(), this, preferLocal: false);
+
+        return Task.CompletedTask;
+    }
+
+    private void ActivateRequestProcessingLimits()
+    {
+        for (var i = 0; i < _maxAccepts; i++)
+        {
+            ProcessRequestsWorker();
+        }
+    }
+
+    private void UpdateUrlPrefixes(IList<string> serverAddressCopy)
+    {
+        foreach (var value in serverAddressCopy)
+        {
+            Listener.Options.UrlPrefixes.Add(value);
+        }
+    }
+
+    internal int IncrementOutstandingRequest()
+    {
+        return Interlocked.Increment(ref _outstandingRequests);
+    }
+
+    internal int DecrementOutstandingRequest()
+    {
+        var count = Interlocked.Decrement(ref _outstandingRequests);
+
+        if (count == 0)
+        {
+            lock (_shutdownLock)
+            {
+                // Only signal after accept loops have completed to prevent early signaling
+                // while new requests can still be accepted.
+                if (_acceptLoopCount == 0)
+                {
+                    _requestsDrained.TrySetResult();
+                }
+            }
+        }
+
+        return count;
+    }
+
+    // The message pump.
+    // When we start listening for the next request on one thread, we may need to be sure that the
+    // completion continues on another thread as to not block the current request processing.
+    // The awaits will manage stack depth for us.
+    private void ProcessRequestsWorker()
+    {
+        Debug.Assert(RequestContextFactory != null);
+
+        lock (_shutdownLock)
+        {
+            if (_stopping)
+            {
+                return;
+            }
+            _acceptLoopCount++;
+        }
+
+        // Allocate and accept context per loop and reuse it for all accepts
+        var acceptContext = new AsyncAcceptContext(Listener, RequestContextFactory, _logger);
+
+        var loop = new AcceptLoop(acceptContext, this);
+
+        ThreadPool.UnsafeQueueUserWorkItem(loop, preferLocal: false);
+    }
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        Task shutdownTask;
+        lock (_shutdownLock)
+        {
+            if (_stopTask is not null)
+            {
+                shutdownTask = _stopTask;
+            }
+            else
+            {
+                _stopping = true;
+
+                // If no accept loops were started, signal completion immediately
+                if (_acceptLoopCount == 0)
+                {
+                    _acceptLoopsCompleted.TrySetResult();
                 }
 
-                UpdateUrlPrefixes(serverAddressCopy);
-            }
-            else if (_options.UrlPrefixes.Count > 0)
-            {
-                if (hostingUrlsPresent)
-                {
-                    _logger.LogWarning(LoggerEventIds.ClearedAddresses, $"Overriding address(es) '{string.Join(", ", _serverAddresses.Addresses)}'. " +
-                        $"Binding to endpoints added to {nameof(HttpSysOptions.UrlPrefixes)} instead.");
-
-                    _serverAddresses.Addresses.Clear();
-                }
-
-            }
-            else if (hostingUrlsPresent)
-            {
-                UpdateUrlPrefixes(serverAddressCopy);
-            }
-            else if (Listener.RequestQueue.Created)
-            {
-                _logger.LogDebug(LoggerEventIds.BindingToDefault, $"No listening endpoints were configured. Binding to {Constants.DefaultServerAddress} by default.");
-
-                Listener.Options.UrlPrefixes.Add(Constants.DefaultServerAddress);
-            }
-            // else // Attaching to an existing queue, don't add a default.
-
-            // Can't call Start twice
-            Contract.Assert(Application == null);
-
-            Contract.Assert(application != null);
-
-            Application = new ApplicationWrapper<TContext>(application);
-
-            Listener.Start();
-
-            // Update server addresses after we start listening as port 0
-            // needs to be selected at the point of binding.
-            foreach (var prefix in _options.UrlPrefixes)
-            {
-                _serverAddresses.Addresses.Add(prefix.FullPrefix);
-            }
-
-            ActivateRequestProcessingLimits();
-
-            return Task.CompletedTask;
-        }
-
-        private void ActivateRequestProcessingLimits()
-        {
-            for (int i = _acceptorCounts; i < _maxAccepts; i++)
-            {
-                ProcessRequestsWorker();
+                _stopTask = shutdownTask = StopAsyncCore();
             }
         }
 
-        private void UpdateUrlPrefixes(IList<string> serverAddressCopy)
+        // Register cancellation for all callers (not just the first).
+        // Any caller's canceled token should unblock the shutdown.
+        using var registration = cancellationToken.Register(static state =>
         {
-            foreach (var value in serverAddressCopy)
+            var pump = (MessagePump)state!;
+            Log.StopCancelled(pump._logger, pump._outstandingRequests);
+            pump._requestsDrained.TrySetResult();
+        }, this);
+
+        await shutdownTask.ConfigureAwait(false);
+    }
+
+    private async Task StopAsyncCore()
+    {
+        // Shutdown the request queue to cancel pending accept operations.
+        // This will cause the accept loops to wake up with an error and exit.
+        Listener.RequestQueue.StopProcessingRequests();
+
+        // Wait for accept loops to complete before disposing the listener.
+        // This prevents a race where the BoundHandle is disposed while
+        // AsyncAcceptContext is still trying to use it for cleanup.
+        // After this completes, DecrementOutstandingRequest can signal _requestsDrained
+        // (it checks _acceptLoopCount).
+        await _acceptLoopsCompleted.Task.ConfigureAwait(false);
+
+        if (Interlocked.CompareExchange(ref _outstandingRequests, 0, 0) != 0)
+        {
+            Log.WaitingForRequestsToDrain(_logger, _outstandingRequests);
+            await _requestsDrained.Task.ConfigureAwait(false);
+        }
+
+        Listener.Dispose();
+    }
+
+    public DelegationRule CreateDelegationRule(string queueName, string uri)
+    {
+        var rule = new DelegationRule(Listener.UrlGroup, queueName, uri, _logger);
+        Listener.UrlGroup.SetDelegationProperty(rule.Queue);
+        return rule;
+    }
+
+    // Ungraceful shutdown
+    public void Dispose()
+    {
+        StopAsync(new CancellationToken(canceled: true)).GetAwaiter().GetResult();
+    }
+
+    private void AcceptLoopCompleted()
+    {
+        lock (_shutdownLock)
+        {
+            if (--_acceptLoopCount == 0)
             {
-                Listener.Options.UrlPrefixes.Add(value);
+                _acceptLoopsCompleted.TrySetResult();
             }
         }
+    }
 
-        internal int IncrementOutstandingRequest()
+    private sealed class AcceptLoop : IThreadPoolWorkItem
+    {
+        private readonly AsyncAcceptContext _asyncAcceptContext;
+        private readonly MessagePump _messagePump;
+        private readonly bool _preferInlineScheduling;
+
+        public AcceptLoop(AsyncAcceptContext asyncAcceptContext,
+                          MessagePump messagePump)
         {
-            return Interlocked.Increment(ref _outstandingRequests);
+            _asyncAcceptContext = asyncAcceptContext;
+            _messagePump = messagePump;
+            _preferInlineScheduling = _messagePump._options.UnsafePreferInlineScheduling;
         }
 
-        internal int DecrementOutstandingRequest()
+        public void Execute()
         {
-            return Interlocked.Decrement(ref _outstandingRequests);
+            _ = ExecuteAsync();
         }
 
-        internal void SetShutdownSignal()
+        private async Task ExecuteAsync()
         {
-            _shutdownSignal.TrySetResult(null);
-        }
-
-        // The message pump.
-        // When we start listening for the next request on one thread, we may need to be sure that the
-        // completion continues on another thread as to not block the current request processing.
-        // The awaits will manage stack depth for us.
-        private async void ProcessRequestsWorker()
-        {
-            int workerIndex = Interlocked.Increment(ref _acceptorCounts);
-            while (!Stopping && workerIndex <= _maxAccepts)
+            while (!_messagePump.Stopping)
             {
                 // Receive a request
                 RequestContext requestContext;
                 try
                 {
-                    requestContext = await Listener.AcceptAsync().SupressContext();
-                    // Assign the message pump to this request context
-                    requestContext.MessagePump = this;
-                }
-                catch (Exception exception)
-                {
-                    Contract.Assert(Stopping);
-                    if (Stopping)
+                    requestContext = await _messagePump.Listener.AcceptAsync(_asyncAcceptContext);
+
+                    if (!_messagePump.Listener.ValidateRequest(requestContext))
                     {
-                        _logger.LogDebug(LoggerEventIds.AcceptErrorStopping, exception, "Failed to accept a request, the server is stopping.");
+                        // Dispose the request
+                        requestContext.ReleasePins();
+                        requestContext.Dispose();
+
+                        // If either of these is false then a response has already been sent to the client, so we can accept the next request
+                        continue;
                     }
-                    else
-                    {
-                        _logger.LogError(LoggerEventIds.AcceptError, exception, "Failed to accept a request.");
-                    }
-                    continue;
-                }
-                try
-                {
-                    ThreadPool.UnsafeQueueUserWorkItem(requestContext, preferLocal: false);
                 }
                 catch (Exception ex)
                 {
-                    // Request processing failed to be queued in threadpool
-                    // Log the error message, release throttle and move on
-                    _logger.LogError(LoggerEventIds.RequestListenerProcessError, ex, "ProcessRequestAsync");
-                }
-            }
-            Interlocked.Decrement(ref _acceptorCounts);
-        }
-
-        public Task StopAsync(CancellationToken cancellationToken)
-        {
-            void RegisterCancelation()
-            {
-                cancellationToken.Register(() =>
-                {
-                    if (Interlocked.Exchange(ref _shutdownSignalCompleted, 1) == 0)
+                    Debug.Assert(_messagePump.Stopping);
+                    if (_messagePump.Stopping)
                     {
-                        _logger.LogInformation(LoggerEventIds.StopCancelled, "Canceled, terminating " + _outstandingRequests + " request(s).");
-                        _shutdownSignal.TrySetResult(null);
+                        Log.AcceptErrorStopping(_messagePump._logger, ex);
                     }
-                });
-            }
+                    else
+                    {
+                        Log.AcceptError(_messagePump._logger, ex);
+                    }
+                    continue;
+                }
 
-            if (Interlocked.Exchange(ref _stopping, 1) == 1)
-            {
-                RegisterCancelation();
+                // Increment BEFORE queuing to prevent race where the queued accept loop
+                // exits and signals completion before we've counted this request.
+                _messagePump.IncrementOutstandingRequest();
 
-                return _shutdownSignal.Task;
-            }
-
-            try
-            {
-                // Wait for active requests to drain
-                if (_outstandingRequests > 0)
+                if (_preferInlineScheduling)
                 {
-                    _logger.LogInformation(LoggerEventIds.WaitingForRequestsToDrain, "Stopping, waiting for " + _outstandingRequests + " request(s) to drain.");
-                    RegisterCancelation();
+                    await HandleRequest(requestContext);
                 }
                 else
                 {
-                    _shutdownSignal.TrySetResult(null);
+                    // Queue another accept before we execute the request
+                    ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
+
+                    await HandleRequest(requestContext);
+
+                    // We're done with this thread, accept loop was continued via ThreadPool.UnsafeQueueUserWorkItem
+                    return;
                 }
             }
-            catch (Exception ex)
+
+            // Only dispose and signal completion when the loop is actually done (not re-queued)
+            _asyncAcceptContext.Dispose();
+            _messagePump.AcceptLoopCompleted();
+
+            async Task HandleRequest(RequestContext requestContext)
             {
-                _shutdownSignal.TrySetException(ex);
-            }
-
-            return _shutdownSignal.Task;
-        }
-
-        public void Dispose()
-        {
-            _stopping = 1;
-            _shutdownSignal.TrySetResult(null);
-
-            Listener.Dispose();
-        }
-
-        private class ApplicationWrapper<TContext> : IHttpApplication<object>
-        {
-            private readonly IHttpApplication<TContext> _application;
-
-            public ApplicationWrapper(IHttpApplication<TContext> application)
-            {
-                _application = application;
-            }
-
-            public object CreateContext(IFeatureCollection contextFeatures)
-            {
-                return _application.CreateContext(contextFeatures);
-            }
-
-            public void DisposeContext(object context, Exception exception)
-            {
-                _application.DisposeContext((TContext)context, exception);
-            }
-
-            public Task ProcessRequestAsync(object context)
-            {
-                return _application.ProcessRequestAsync((TContext)context);
+                try
+                {
+                    // Use this thread to start the execution of the request (avoid the double threadpool dispatch)
+                    await requestContext.ExecuteAsync();
+                }
+                catch (Exception ex)
+                {
+                    // Request processing failed
+                    // Log the error message, release throttle and move on
+                    Log.RequestListenerProcessError(_messagePump._logger, ex);
+                }
+                finally
+                {
+                    _messagePump.DecrementOutstandingRequest();
+                }
             }
         }
     }

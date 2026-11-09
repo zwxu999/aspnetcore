@@ -1,9 +1,11 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
+import { AbortError } from "../src/Errors";
 import { HubConnection, HubConnectionState } from "../src/HubConnection";
 import { IConnection } from "../src/IConnection";
 import { HubMessage, IHubProtocol, MessageType } from "../src/IHubProtocol";
+import type { IAuthenticationRefreshOptions } from "../src/IAuthenticationRefreshOptions";
 import { ILogger, LogLevel } from "../src/ILogger";
 import { TransferFormat } from "../src/ITransport";
 import { JsonHubProtocol } from "../src/JsonHubProtocol";
@@ -16,8 +18,8 @@ import { VerifyLogger } from "./Common";
 import { TestConnection } from "./TestConnection";
 import { delayUntil, PromiseSource, registerUnhandledRejectionHandler } from "./Utils";
 
-function createHubConnection(connection: IConnection, logger?: ILogger | null, protocol?: IHubProtocol | null) {
-    return HubConnection.create(connection, logger || NullLogger.instance, protocol || new JsonHubProtocol());
+function createHubConnection(connection: IConnection, logger?: ILogger | null, protocol?: IHubProtocol | null, authenticationRefreshOptions?: IAuthenticationRefreshOptions) {
+    return HubConnection.create(connection, logger || NullLogger.instance, protocol || new JsonHubProtocol(), undefined, undefined, undefined, undefined, authenticationRefreshOptions);
 }
 
 registerUnhandledRejectionHandler();
@@ -30,7 +32,7 @@ describe("HubConnection", () => {
                 const hubConnection = createHubConnection(connection, logger);
                 try {
                     await hubConnection.start();
-                    expect(connection.sentData.length).toBe(1);
+                    expect(connection.sentData.length).toBe(2);
                     expect(JSON.parse(connection.sentData[0])).toEqual({
                         protocol: "json",
                         version: 1,
@@ -109,7 +111,7 @@ describe("HubConnection", () => {
     });
 
     describe("ping", () => {
-        it("automatically sends multiple pings", async () => {
+        it("sends pings when receiving pings", async () => {
             await VerifyLogger.run(async (logger) => {
                 const connection = new TestConnection();
                 const hubConnection = createHubConnection(connection, logger);
@@ -118,7 +120,14 @@ describe("HubConnection", () => {
 
                 try {
                     await hubConnection.start();
+
+                    const pingInterval = setInterval(async () => {
+                        await connection.receive({ type: MessageType.Ping });
+                    }, 5);
+
                     await delayUntil(500);
+
+                    clearInterval(pingInterval);
 
                     const numPings = connection.sentData.filter((s) => JSON.parse(s).type === MessageType.Ping).length;
                     expect(numPings).toBeGreaterThanOrEqual(2);
@@ -162,6 +171,331 @@ describe("HubConnection", () => {
                     expect(hubConnection.state).toBe(HubConnectionState.Disconnected);
                 }
             });
+
+        });
+
+        it("sends close message", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    await hubConnection.stop();
+
+                    // Handshake, Ping, Close
+                    expect(connection.sentData.length).toBe(3);
+                    expect(JSON.parse(connection.sentData[2])).toEqual({
+                        type: MessageType.Close,
+                    });
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+    });
+
+    describe("authentication refresh", () => {
+        afterEach(() => {
+            jest.useRealTimers();
+        });
+
+        it("refreshes authentication manually and invokes refreshed callback", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                connection.features.authenticationRefresh = {
+                    refreshAuthentication: () => Promise.resolve(60),
+                };
+
+                let refreshedContextConnection: HubConnection | undefined;
+                let refreshedTokenLifetimeInSeconds: number | undefined;
+                let refreshedAt: Date | undefined;
+                let callbackInvocations = 0;
+                const hubConnection = createHubConnection(connection, logger, undefined, {
+                    enableAutoRefresh: false,
+                });
+                hubConnection.onAuthenticationRefreshed((context) => {
+                    callbackInvocations++;
+                    refreshedContextConnection = context.connection;
+                    refreshedTokenLifetimeInSeconds = context.newTokenLifetimeInSeconds;
+                    refreshedAt = context.refreshedAt;
+                });
+                hubConnection.onAuthenticationRefreshed(() => callbackInvocations++);
+
+                try {
+                    await hubConnection.start();
+
+                    const newTokenLifetimeInSeconds = await hubConnection.refreshAuthentication();
+
+                    expect(newTokenLifetimeInSeconds).toBe(60);
+                    expect(refreshedContextConnection).toBe(hubConnection);
+                    expect(refreshedTokenLifetimeInSeconds).toBe(60);
+                    expect(refreshedAt).toBeInstanceOf(Date);
+                    expect(callbackInvocations).toBe(2);
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("invokes failed callback and rejects manual refresh when refresh fails", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const refreshError = new Error("refresh failed");
+                const connection = new TestConnection();
+                connection.features.authenticationRefresh = {
+                    refreshAuthentication: () => Promise.reject(refreshError),
+                };
+
+                let failedContextConnection: HubConnection | undefined;
+                let failedError: Error | undefined;
+                let callbackInvocations = 0;
+                const hubConnection = createHubConnection(connection, logger, undefined, {
+                    enableAutoRefresh: false,
+                });
+                hubConnection.onAuthenticationRefreshFailed((context) => {
+                    callbackInvocations++;
+                    failedContextConnection = context.connection;
+                    failedError = context.error;
+                });
+                hubConnection.onAuthenticationRefreshFailed(() => callbackInvocations++);
+
+                try {
+                    await hubConnection.start();
+
+                    await expect(hubConnection.refreshAuthentication()).rejects.toThrow("refresh failed");
+                    expect(failedContextConnection).toBe(hubConnection);
+                    expect(failedError).toBe(refreshError);
+                    expect(callbackInvocations).toBe(2);
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("schedules automatic refresh from initial token lifetime", async () => {
+            jest.useFakeTimers();
+
+            await VerifyLogger.run(async (logger) => {
+                let refreshCount = 0;
+                const connection = new TestConnection(true, true);
+                connection.features.authenticationRefresh = {
+                    initialTokenLifetimeInSeconds: 100,
+                    refreshAuthentication: () => {
+                        refreshCount++;
+                        return Promise.resolve(120);
+                    },
+                };
+
+                const hubConnection = createHubConnection(connection, logger, undefined, {
+                    refreshBeforeExpirationInMilliseconds: 30_000,
+                });
+
+                try {
+                    await hubConnection.start();
+
+                    expect(jest.getTimerCount()).toBe(1);
+                    jest.advanceTimersByTime(69_999);
+                    await Promise.resolve();
+                    expect(refreshCount).toBe(0);
+
+                    jest.advanceTimersByTime(1);
+                    await Promise.resolve();
+                    await Promise.resolve();
+
+                    expect(refreshCount).toBe(1);
+                    expect(jest.getTimerCount()).toBe(1);
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("schedules short-lived token refreshes before expiration", async () => {
+            jest.useFakeTimers();
+
+            await VerifyLogger.run(async (logger) => {
+                let refreshCount = 0;
+                const connection = new TestConnection(true, true);
+                connection.features.authenticationRefresh = {
+                    initialTokenLifetimeInSeconds: 10,
+                    refreshAuthentication: () => {
+                        refreshCount++;
+                        return Promise.resolve(undefined);
+                    },
+                };
+
+                const hubConnection = createHubConnection(connection, logger, undefined, {});
+
+                try {
+                    await hubConnection.start();
+
+                    expect(jest.getTimerCount()).toBe(1);
+                    jest.advanceTimersByTime(4_999);
+                    await Promise.resolve();
+                    expect(refreshCount).toBe(0);
+
+                    jest.advanceTimersByTime(1);
+                    await Promise.resolve();
+                    await Promise.resolve();
+
+                    expect(refreshCount).toBe(1);
+                    expect(jest.getTimerCount()).toBe(0);
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("does not schedule automatic refresh unless configured", async () => {
+            jest.useFakeTimers();
+
+            await VerifyLogger.run(async (logger) => {
+                let refreshCount = 0;
+                const connection = new TestConnection(true, true);
+                connection.features.authenticationRefresh = {
+                    initialTokenLifetimeInSeconds: 60,
+                    refreshAuthentication: () => {
+                        refreshCount++;
+                        return Promise.resolve(undefined);
+                    },
+                };
+
+                const hubConnection = createHubConnection(connection, logger);
+
+                try {
+                    await hubConnection.start();
+
+                    expect(jest.getTimerCount()).toBe(0);
+                    jest.advanceTimersByTime(60_000);
+                    await Promise.resolve();
+
+                    expect(refreshCount).toBe(0);
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("cleans up automatic refresh timer when stopped", async () => {
+            jest.useFakeTimers();
+
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection(true, true);
+                connection.features.authenticationRefresh = {
+                    initialTokenLifetimeInSeconds: 60,
+                    refreshAuthentication: () => Promise.resolve(undefined),
+                };
+
+                const hubConnection = createHubConnection(connection, logger, undefined, {});
+
+                await hubConnection.start();
+                expect(jest.getTimerCount()).toBe(1);
+
+                await hubConnection.stop();
+                expect(jest.getTimerCount()).toBe(0);
+            });
+        });
+
+        it("does not reschedule automatic refresh when stopped while refresh is in progress", async () => {
+            jest.useFakeTimers();
+
+            await VerifyLogger.run(async (logger) => {
+                const refreshStarted = new PromiseSource();
+                const refreshResult = new PromiseSource<number | undefined>();
+                const refreshed = new PromiseSource();
+                const connection = new TestConnection(true, true);
+                connection.features.authenticationRefresh = {
+                    initialTokenLifetimeInSeconds: 60,
+                    refreshAuthentication: () => {
+                        refreshStarted.resolve();
+                        return refreshResult.promise;
+                    },
+                };
+
+                const hubConnection = createHubConnection(connection, logger, undefined, {});
+                hubConnection.onAuthenticationRefreshed(() => refreshed.resolve());
+
+                await hubConnection.start();
+                jest.advanceTimersByTime(30_000);
+                await refreshStarted.promise;
+
+                await hubConnection.stop();
+                expect(jest.getTimerCount()).toBe(0);
+
+                refreshResult.resolve(120);
+                await refreshed.promise;
+                await Promise.resolve();
+
+                expect(jest.getTimerCount()).toBe(0);
+            });
+        });
+
+        it("does not reschedule from a stale authentication refresh feature", async () => {
+            jest.useFakeTimers();
+
+            await VerifyLogger.run(async (logger) => {
+                const refreshStarted = new PromiseSource();
+                const refreshResult = new PromiseSource<number | undefined>();
+                const connection = new TestConnection(true, true);
+                connection.features.authenticationRefresh = {
+                    refreshAuthentication: () => {
+                        refreshStarted.resolve();
+                        return refreshResult.promise;
+                    },
+                };
+
+                const hubConnection = createHubConnection(connection, logger, undefined, {});
+
+                try {
+                    await hubConnection.start();
+                    expect(jest.getTimerCount()).toBe(0);
+
+                    const refreshPromise = hubConnection.refreshAuthentication();
+                    await refreshStarted.promise;
+
+                    connection.features.authenticationRefresh = {
+                        refreshAuthentication: () => Promise.resolve(120),
+                    };
+
+                    refreshResult.resolve(120);
+
+                    expect(await refreshPromise).toBe(120);
+                    expect(jest.getTimerCount()).toBe(0);
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("logs automatic refresh failures after invoking failed callback", async () => {
+            jest.useFakeTimers();
+
+            const refreshError = new Error("refresh failed");
+            let failedError: Error | undefined;
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection(true, true);
+                connection.features.authenticationRefresh = {
+                    initialTokenLifetimeInSeconds: 60,
+                    refreshAuthentication: () => Promise.reject(refreshError),
+                };
+
+                const hubConnection = createHubConnection(connection, logger, undefined, {});
+                hubConnection.onAuthenticationRefreshFailed((context) => {
+                    failedError = context.error;
+                });
+
+                try {
+                    await hubConnection.start();
+
+                    jest.advanceTimersByTime(30_000);
+                    await Promise.resolve();
+                    await Promise.resolve();
+
+                    expect(failedError).toBe(refreshError);
+                } finally {
+                    await hubConnection.stop();
+                }
+            }, /Authentication refresh failed: Error: refresh failed/);
         });
     });
 
@@ -173,7 +507,6 @@ describe("HubConnection", () => {
                 const hubConnection = createHubConnection(connection, logger);
                 try {
                     // We don't actually care to wait for the send.
-                    // tslint:disable-next-line:no-floating-promises
                     hubConnection.send("testMethod", "arg", 42)
                         .catch((_) => { }); // Suppress exception and unhandled promise rejection warning.
 
@@ -201,7 +534,6 @@ describe("HubConnection", () => {
                 const hubConnection = createHubConnection(connection, logger);
                 try {
                     // We don't actually care to wait for the send.
-                    // tslint:disable-next-line:no-floating-promises
                     hubConnection.send("testMethod", "arg", null)
                         .catch((_) => { }); // Suppress exception and unhandled promise rejection warning.
 
@@ -231,7 +563,6 @@ describe("HubConnection", () => {
                 const hubConnection = createHubConnection(connection, logger);
                 try {
                     // We don't actually care to wait for the send.
-                    // tslint:disable-next-line:no-floating-promises
                     hubConnection.invoke("testMethod", "arg", 42)
                         .catch((_) => { }); // Suppress exception and unhandled promise rejection warning.
 
@@ -387,7 +718,10 @@ describe("HubConnection", () => {
                     await connection.stop();
                     try {
                         await startPromise;
-                    } catch { }
+                    } catch (e) {
+                        expect(e).toBeInstanceOf(AbortError);
+                        expect((e as AbortError).message).toBe("The underlying connection was closed before the hub handshake could complete.");
+                    }
                 } finally {
                     await hubConnection.stop();
                 }
@@ -440,7 +774,7 @@ describe("HubConnection", () => {
                     const subject = new Subject();
                     const invokePromise = hubConnection.invoke("testMethod", "arg", subject);
 
-                    expect(JSON.parse(connection.sentData[1])).toEqual({
+                    expect(JSON.parse(connection.sentData[2])).toEqual({
                         arguments: ["arg"],
                         invocationId: "1",
                         streamIds: ["0"],
@@ -452,7 +786,7 @@ describe("HubConnection", () => {
                     await new Promise<void>((resolve) => {
                         setTimeout(resolve, 50);
                     });
-                    expect(JSON.parse(connection.sentData[2])).toEqual({
+                    expect(JSON.parse(connection.sentData[3])).toEqual({
                         invocationId: "0",
                         item: "item numero uno",
                         type: MessageType.StreamItem,
@@ -477,7 +811,7 @@ describe("HubConnection", () => {
                     const subject = new Subject();
                     await hubConnection.send("testMethod", "arg", subject);
 
-                    expect(JSON.parse(connection.sentData[1])).toEqual({
+                    expect(JSON.parse(connection.sentData[2])).toEqual({
                         arguments: ["arg"],
                         streamIds: ["0"],
                         target: "testMethod",
@@ -488,7 +822,7 @@ describe("HubConnection", () => {
                     await new Promise<void>((resolve) => {
                         setTimeout(resolve, 50);
                     });
-                    expect(JSON.parse(connection.sentData[2])).toEqual({
+                    expect(JSON.parse(connection.sentData[3])).toEqual({
                         invocationId: "0",
                         item: "item numero uno",
                         type: MessageType.StreamItem,
@@ -520,7 +854,7 @@ describe("HubConnection", () => {
                         },
                     });
 
-                    expect(JSON.parse(connection.sentData[1])).toEqual({
+                    expect(JSON.parse(connection.sentData[2])).toEqual({
                         arguments: ["arg"],
                         invocationId: "1",
                         streamIds: ["0"],
@@ -532,7 +866,7 @@ describe("HubConnection", () => {
                     await new Promise<void>((resolve) => {
                         setTimeout(resolve, 50);
                     });
-                    expect(JSON.parse(connection.sentData[2])).toEqual({
+                    expect(JSON.parse(connection.sentData[3])).toEqual({
                         invocationId: "0",
                         item: "item numero uno",
                         type: MessageType.StreamItem,
@@ -642,7 +976,8 @@ describe("HubConnection", () => {
                         type: MessageType.Invocation,
                     });
 
-                    expect(warnings).toEqual(["No client method with the name 'message' found."]);
+                    expect(warnings).toEqual(["No client method with the name 'message' found.",
+                        "No result given for 'message' method and invocation ID '0'."]);
                 } finally {
                     await hubConnection.stop();
                 }
@@ -657,8 +992,12 @@ describe("HubConnection", () => {
                     await hubConnection.start();
 
                     let count = 0;
+                    const p = new PromiseSource<void>();
                     const handler = () => { count++; };
-                    const secondHandler = () => { count++; };
+                    const secondHandler = () => {
+                        count++;
+                        p.resolve();
+                    };
                     hubConnection.on("inc", handler);
                     hubConnection.on("inc", secondHandler);
 
@@ -669,6 +1008,7 @@ describe("HubConnection", () => {
                         type: MessageType.Invocation,
                     });
 
+                    await p;
                     hubConnection.off("inc");
 
                     connection.receive({
@@ -693,8 +1033,12 @@ describe("HubConnection", () => {
                     await hubConnection.start();
 
                     let count = 0;
+                    let p = new PromiseSource<void>();
                     const handler = () => { count++; };
-                    const secondHandler = () => { count++; };
+                    const secondHandler = () => {
+                        count++;
+                        p.resolve();
+                    };
                     hubConnection.on("inc", handler);
                     hubConnection.on("inc", secondHandler);
 
@@ -705,6 +1049,8 @@ describe("HubConnection", () => {
                         type: MessageType.Invocation,
                     });
 
+                    await p;
+                    p = new PromiseSource<void>();
                     hubConnection.off("inc", handler);
 
                     connection.receive({
@@ -713,6 +1059,8 @@ describe("HubConnection", () => {
                         target: "inc",
                         type: MessageType.Invocation,
                     });
+
+                    await p;
 
                     expect(count).toBe(3);
                 } finally {
@@ -747,7 +1095,7 @@ describe("HubConnection", () => {
             });
         });
 
-        it("callback invoked when servers invokes a method on the client", async () => {
+        it("callback invoked when server invokes a method on the client", async () => {
             await VerifyLogger.run(async (logger) => {
                 const connection = new TestConnection();
                 const hubConnection = createHubConnection(connection, logger);
@@ -755,7 +1103,11 @@ describe("HubConnection", () => {
                     await hubConnection.start();
 
                     let value = "";
-                    hubConnection.on("message", (v) => value = v);
+                    const p = new PromiseSource<void>();
+                    hubConnection.on("message", (v) => {
+                        value = v;
+                        p.resolve();
+                    });
 
                     connection.receive({
                         arguments: ["test"],
@@ -764,11 +1116,44 @@ describe("HubConnection", () => {
                         type: MessageType.Invocation,
                     });
 
+                    await p;
                     expect(value).toBe("test");
                 } finally {
                     await hubConnection.stop();
                 }
             });
+        });
+
+        it("callback invoked when server invokes a method on the client and then handles rejected promise on send", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                let promiseRejected = false;
+                try {
+                    await hubConnection.start();
+                    const p = new PromiseSource<void>();
+                    hubConnection.on("message", async () => {
+                        // Force sending of response to error
+                        connection.send = () => {
+                            promiseRejected = true;
+                            return Promise.reject(new Error("Send error"));
+                        }
+                        p.resolve();
+                    });
+                    connection.receive({
+                        arguments: ["test"],
+                        nonblocking: true,
+                        target: "message",
+                        invocationId: "0",
+                        type: MessageType.Invocation,
+                    });
+
+                    await p;
+                    expect(promiseRejected).toBe(true);
+                } finally {
+                    await hubConnection.stop();
+                }
+            }, new RegExp("Invoke client method threw error: Error: Send error"));
         });
 
         it("stop on handshake error", async () => {
@@ -798,15 +1183,35 @@ describe("HubConnection", () => {
             "Server returned handshake error: Error!");
         });
 
+        it("connection stopped before handshake completes",async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection(false);
+                const hubConnection = createHubConnection(connection, logger);
+
+                let startCompleted = false;
+                const startPromise = hubConnection.start().then(() => startCompleted = true);
+                expect(startCompleted).toBe(false);
+
+                await hubConnection.stop()
+
+                try {
+                    await startPromise
+                } catch (e) {
+                    expect(e).toBeInstanceOf(AbortError);
+                    expect((e as AbortError).message).toBe("The connection was stopped before the hub handshake could complete.");
+                }
+            }, "The connection was stopped before the hub handshake could complete.");
+        });
+
         it("stop on close message", async () => {
             await VerifyLogger.run(async (logger) => {
                 const connection = new TestConnection();
                 const hubConnection = createHubConnection(connection, logger);
                 try {
-                    let isClosed = false;
+                    const p = new PromiseSource<void>();
                     let closeError: Error | undefined;
                     hubConnection.onclose((e) => {
-                        isClosed = true;
+                        p.resolve();
                         closeError = e;
                     });
 
@@ -816,7 +1221,7 @@ describe("HubConnection", () => {
                         type: MessageType.Close,
                     });
 
-                    expect(isClosed).toEqual(true);
+                    await p;
                     expect(closeError).toBeUndefined();
                 } finally {
                     await hubConnection.stop();
@@ -862,8 +1267,12 @@ describe("HubConnection", () => {
 
                     let numInvocations1 = 0;
                     let numInvocations2 = 0;
+                    const p = new PromiseSource<void>();
                     hubConnection.on("message", () => numInvocations1++);
-                    hubConnection.on("message", () => numInvocations2++);
+                    hubConnection.on("message", () => {
+                        numInvocations2++;
+                        p.resolve();
+                    });
 
                     connection.receive({
                         arguments: [],
@@ -872,6 +1281,7 @@ describe("HubConnection", () => {
                         type: MessageType.Invocation,
                     });
 
+                    await p;
                     expect(numInvocations1).toBe(1);
                     expect(numInvocations2).toBe(1);
                 } finally {
@@ -909,6 +1319,59 @@ describe("HubConnection", () => {
 
                     expect(numInvocations).toBe(1);
                 } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("unsubscribing dynamically doesn't affect the current invocation loop", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const eventToTrack = "eventName";
+
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    let numInvocations1 = 0;
+                    let numInvocations2 = 0;
+                    const callback1 = () => {
+                        hubConnection.off(eventToTrack, callback1);
+                        numInvocations1++;
+                    }
+                    let p = new PromiseSource<void>();
+                    const callback2 = () => {
+                        numInvocations2++;
+                        p.resolve();
+                    };
+
+                    hubConnection.on(eventToTrack, callback1);
+                    hubConnection.on(eventToTrack, callback2);
+
+                    connection.receive({
+                        arguments: [],
+                        nonblocking: true,
+                        target: eventToTrack,
+                        type: MessageType.Invocation,
+                    });
+
+                    await p;
+                    p = new PromiseSource<void>();
+                    expect(numInvocations1).toBe(1);
+                    expect(numInvocations2).toBe(1);
+
+                    connection.receive({
+                        arguments: [],
+                        nonblocking: true,
+                        target: eventToTrack,
+                        type: MessageType.Invocation,
+                    });
+
+                    await p;
+                    expect(numInvocations1).toBe(1);
+                    expect(numInvocations2).toBe(2);
+                }
+                finally {
                     await hubConnection.stop();
                 }
             });
@@ -961,7 +1424,8 @@ describe("HubConnection", () => {
                         type: MessageType.Invocation,
                     });
 
-                    expect(warnings).toEqual(["No client method with the name 'message' found."]);
+                    expect(warnings).toEqual(["No client method with the name 'message' found.",
+                        "No result given for 'message' method and invocation ID '0'."]);
 
                     hubConnection.off(null!, undefined!);
                     hubConnection.off(undefined!, null!);
@@ -973,6 +1437,318 @@ describe("HubConnection", () => {
                     await hubConnection.stop();
                 }
             });
+        });
+
+        it("can return result from callback", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    hubConnection.on("message", () => 10);
+
+                    connection.receive({
+                        arguments: [],
+                        invocationId: "1",
+                        nonblocking: true,
+                        target: "message",
+                        type: MessageType.Invocation,
+                    });
+
+                    // nothing to wait on and the code is all synchronous, but because of how JS and async works we need to trigger
+                    // async here to guarantee the sent message is written
+                    await delayUntil(1);
+
+                    expect(connection.parsedSentData.length).toEqual(3);
+                    expect(connection.parsedSentData[2].type).toEqual(3);
+                    expect(connection.parsedSentData[2].result).toEqual(10);
+                    expect(connection.parsedSentData[2].invocationId).toEqual("1");
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("can return null result from callback", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    hubConnection.on("message", () => null);
+
+                    connection.receive({
+                        arguments: [],
+                        invocationId: "1",
+                        nonblocking: true,
+                        target: "message",
+                        type: MessageType.Invocation,
+                    });
+
+                    // nothing to wait on and the code is all synchronous, but because of how JS and async works we need to trigger
+                    // async here to guarantee the sent message is written
+                    await delayUntil(1);
+
+                    expect(connection.parsedSentData.length).toEqual(3);
+                    expect(connection.parsedSentData[2].type).toEqual(3);
+                    expect(connection.parsedSentData[2].result).toBeNull();
+                    expect(connection.parsedSentData[2].invocationId).toEqual("1");
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("can return task result from callback", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    const p = new PromiseSource<number>();
+                    hubConnection.on("message", () => p);
+
+                    connection.receive({
+                        arguments: [],
+                        invocationId: "1",
+                        nonblocking: true,
+                        target: "message",
+                        type: MessageType.Invocation,
+                    });
+                    p.resolve(13);
+
+                    // nothing to wait on and the code is all synchronous, but because of how JS and async works we need to trigger
+                    // async here to guarantee the sent message is written
+                    await delayUntil(1);
+
+                    expect(connection.parsedSentData.length).toEqual(3);
+                    expect(connection.parsedSentData[2].type).toEqual(3);
+                    expect(connection.parsedSentData[2].result).toEqual(13);
+                    expect(connection.parsedSentData[2].invocationId).toEqual("1");
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("can throw from callback when expecting result", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    hubConnection.on("message", () => { throw new Error("from callback"); });
+
+                    connection.receive({
+                        arguments: [],
+                        invocationId: "1",
+                        nonblocking: true,
+                        target: "message",
+                        type: MessageType.Invocation,
+                    });
+
+                    // nothing to wait on and the code is all synchronous, but because of how JS and async works we need to trigger
+                    // async here to guarantee the sent message is written
+                    await delayUntil(1);
+
+                    expect(connection.parsedSentData.length).toEqual(3);
+                    expect(connection.parsedSentData[2].type).toEqual(3);
+                    expect(connection.parsedSentData[2].error).toEqual("Error: from callback");
+                    expect(connection.parsedSentData[2].invocationId).toEqual("1");
+                } finally {
+                    await hubConnection.stop();
+                }
+            }, "A callback for the method 'message' threw error 'Error: from callback'.");
+        });
+
+        it("multiple results sends error", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    hubConnection.on("message", () => 3);
+                    hubConnection.on("message", () => 4);
+
+                    connection.receive({
+                        arguments: [],
+                        invocationId: "1",
+                        nonblocking: true,
+                        target: "message",
+                        type: MessageType.Invocation,
+                    });
+
+                    // nothing to wait on and the code is all synchronous, but because of how JS and async works we need to trigger
+                    // async here to guarantee the sent message is written
+                    await delayUntil(1);
+
+                    expect(connection.parsedSentData.length).toEqual(3);
+                    expect(connection.parsedSentData[2].type).toEqual(3);
+                    expect(connection.parsedSentData[2].error).toEqual('Client provided multiple results.');
+                    expect(connection.parsedSentData[2].invocationId).toEqual("1");
+                } finally {
+                    await hubConnection.stop();
+                }
+            }, "Multiple results provided for 'message'. Sending error to server.");
+        });
+
+        it("multiple result handlers error from last one sent", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    hubConnection.on("message", () => 3);
+                    hubConnection.on("message", () => { throw new Error("from callback"); });
+
+                    connection.receive({
+                        arguments: [],
+                        invocationId: "1",
+                        nonblocking: true,
+                        target: "message",
+                        type: MessageType.Invocation,
+                    });
+
+                    // nothing to wait on and the code is all synchronous, but because of how JS and async works we need to trigger
+                    // async here to guarantee the sent message is written
+                    await delayUntil(1);
+
+                    expect(connection.parsedSentData.length).toEqual(3);
+                    expect(connection.parsedSentData[2].type).toEqual(3);
+                    expect(connection.parsedSentData[2].error).toEqual("Error: from callback");
+                    expect(connection.parsedSentData[2].result).toBeUndefined();
+                    expect(connection.parsedSentData[2].invocationId).toEqual("1");
+                } finally {
+                    await hubConnection.stop();
+                }
+            }, "A callback for the method 'message' threw error 'Error: from callback'.");
+        });
+
+        it("multiple result handlers ignore error if last one has result", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    hubConnection.on("message", () => { throw new Error("from callback"); });
+                    hubConnection.on("message", () => 3);
+
+                    connection.receive({
+                        arguments: [],
+                        invocationId: "1",
+                        nonblocking: true,
+                        target: "message",
+                        type: MessageType.Invocation,
+                    });
+
+                    // nothing to wait on and the code is all synchronous, but because of how JS and async works we need to trigger
+                    // async here to guarantee the sent message is written
+                    await delayUntil(1);
+
+                    expect(connection.parsedSentData.length).toEqual(3);
+                    expect(connection.parsedSentData[2].type).toEqual(3);
+                    expect(connection.parsedSentData[2].result).toEqual(3);
+                    expect(connection.parsedSentData[2].error).toBeUndefined();
+                    expect(connection.parsedSentData[2].invocationId).toEqual("1");
+                } finally {
+                    await hubConnection.stop();
+                }
+            }, "A callback for the method 'message' threw error 'Error: from callback'.");
+        });
+
+        it("sends completion error if return result expected but not returned", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    hubConnection.on("message", () => {});
+
+                    connection.receive({
+                        arguments: [],
+                        invocationId: "1",
+                        nonblocking: true,
+                        target: "message",
+                        type: MessageType.Invocation,
+                    });
+
+                    // nothing to wait on and the code is all synchronous, but because of how JS and async works we need to trigger
+                    // async here to guarantee the sent message is written
+                    await delayUntil(1);
+
+                    expect(connection.parsedSentData.length).toEqual(3);
+                    expect(connection.parsedSentData[2].type).toEqual(3);
+                    expect(connection.parsedSentData[2].error).toEqual("Client didn't provide a result.");
+                    expect(connection.parsedSentData[2].invocationId).toEqual("1");
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("sends completion error if return result expected but no handlers", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    connection.receive({
+                        arguments: [],
+                        invocationId: "1",
+                        nonblocking: true,
+                        target: "message",
+                        type: MessageType.Invocation,
+                    });
+
+                    // nothing to wait on and the code is all synchronous, but because of how JS and async works we need to trigger
+                    // async here to guarantee the sent message is written
+                    await delayUntil(1);
+
+                    expect(connection.parsedSentData.length).toEqual(3);
+                    expect(connection.parsedSentData[2].type).toEqual(3);
+                    expect(connection.parsedSentData[2].error).toEqual("Client didn't provide a result.");
+                    expect(connection.parsedSentData[2].invocationId).toEqual("1");
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("logs error if return result not expected", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    hubConnection.on("message", () => 13);
+
+                    connection.receive({
+                        arguments: [],
+                        invocationId: undefined,
+                        nonblocking: true,
+                        target: "message",
+                        type: MessageType.Invocation,
+                    });
+
+                    // nothing to wait on and the code is all synchronous, but because of how JS and async works we need to trigger
+                    // async here to guarantee the sent message is written
+                    await delayUntil(1);
+
+                    expect(connection.parsedSentData.length).toEqual(2);
+                } finally {
+                    await hubConnection.stop();
+                }
+            }, "Result given for 'message' method but server is not expecting a result.");
         });
     });
 
@@ -987,9 +1763,9 @@ describe("HubConnection", () => {
 
                     hubConnection.stream("testStream", "arg", 42);
 
-                    // Verify the message is sent (+ handshake)
-                    expect(connection.sentData.length).toBe(2);
-                    expect(JSON.parse(connection.sentData[1])).toEqual({
+                    // Verify the message is sent (+ handshake + ping)
+                    expect(connection.sentData.length).toBe(3);
+                    expect(JSON.parse(connection.sentData[2])).toEqual({
                         arguments: [
                             "arg",
                             42,
@@ -998,9 +1774,6 @@ describe("HubConnection", () => {
                         target: "testStream",
                         type: MessageType.StreamInvocation,
                     });
-
-                    // Close the connection
-                    await hubConnection.stop();
                 } finally {
                     await hubConnection.stop();
                 }
@@ -1174,10 +1947,10 @@ describe("HubConnection", () => {
                     expect(observer.itemsReceived).toEqual([1]);
 
                     // Close message sent asynchronously so we need to wait
-                    await delayUntil(1000, () => connection.sentData.length === 3);
+                    await delayUntil(1000, () => connection.sentData.length === 4);
                     // Verify the cancel is sent (+ handshake)
-                    expect(connection.sentData.length).toBe(3);
-                    expect(JSON.parse(connection.sentData[2])).toEqual({
+                    expect(connection.sentData.length).toBe(4);
+                    expect(JSON.parse(connection.sentData[3])).toEqual({
                         invocationId: connection.lastInvocationId,
                         type: MessageType.CancelInvocation,
                     });
@@ -1185,6 +1958,57 @@ describe("HubConnection", () => {
                     await hubConnection.stop();
                 }
             });
+        });
+
+        it("ignores error from 'next' and 'complete' function", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    hubConnection.stream("testMethod")
+                        .subscribe({
+                            next: (_item) => {
+                                throw new Error("from next");
+                            },
+                            error: (_e) => {},
+                            complete: () => {
+                                throw new Error("from complete");
+                            }
+                        });
+
+                    connection.receive({ type: MessageType.StreamItem, invocationId: connection.lastInvocationId, item: 1 });
+
+                    connection.receive({ type: MessageType.Completion, invocationId: connection.lastInvocationId });
+                } finally {
+                    await hubConnection.stop();
+                }
+            }, /Stream callback threw error: Error: from complete/,
+            /Stream callback threw error: Error: from next/);
+        });
+
+        it("ignores error from 'error' function", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    hubConnection.stream("testMethod")
+                        .subscribe({
+                            next: (_item) => {},
+                            error: (_e) => {
+                                throw new Error("from error");
+                            },
+                            complete: () => {}
+                        });
+
+                    connection.receive({ type: MessageType.StreamItem, invocationId: connection.lastInvocationId, item: 1 });
+                } finally {
+                    await hubConnection.stop();
+                }
+            }, /Stream 'error' callback called with 'Error: Invocation canceled due to the underlying connection being closed.' threw error: Error: from error/);
         });
     });
 
@@ -1293,7 +2117,7 @@ describe("HubConnection", () => {
                     const timeoutInMilliseconds = 400;
                     hubConnection.serverTimeoutInMilliseconds = timeoutInMilliseconds;
 
-                    const p = new PromiseSource<Error>();
+                    const p = new PromiseSource<Error | undefined>();
                     hubConnection.onclose((e) => p.resolve(e));
 
                     await hubConnection.start();
@@ -1323,7 +2147,7 @@ describe("HubConnection", () => {
                 try {
                     hubConnection.serverTimeoutInMilliseconds = 100;
 
-                    const p = new PromiseSource<Error>();
+                    const p = new PromiseSource<Error | undefined>();
                     hubConnection.onclose((e) => p.resolve(e));
 
                     await hubConnection.start();
@@ -1331,6 +2155,572 @@ describe("HubConnection", () => {
                     const error = await p.promise;
 
                     expect(error).toEqual(new Error("Server timeout elapsed without receiving a message from the server."));
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+    });
+
+    describe("stateful reconnect", () => {
+        it("sends sequence message on reconnect", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    // HubConnection should set these
+                    expect(connection.features.disconnected).toBeDefined();
+                    expect(connection.features.resend).toBeDefined();
+
+                    // Pretend TestConnection disconnected
+                    connection.features.disconnected();
+                    await connection.features.resend();
+
+                    expect(connection.sentData.length).toBe(3);
+                    expect(JSON.parse(connection.sentData[2])).toEqual({
+                        type: MessageType.Sequence,
+                        sequenceId: 1,
+                    });
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("resends sent messages on reconnect", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    // HubConnection should set these
+                    expect(connection.features.disconnected).toBeDefined();
+                    expect(connection.features.resend).toBeDefined();
+
+                    await hubConnection.send("test", 13);
+                    await hubConnection.send("test", 12);
+                    await hubConnection.send("test", 11);
+
+                    // Pretend TestConnection disconnected
+                    connection.features.disconnected();
+                    await connection.features.resend();
+
+                    expect(connection.sentData.length).toBe(9);
+                    expect(JSON.parse(connection.sentData[5])).toEqual({
+                        type: MessageType.Sequence,
+                        sequenceId: 1,
+                    });
+                    expect(JSON.parse(connection.sentData[6])).toEqual({
+                        type: MessageType.Invocation,
+                        target: "test",
+                        arguments: [13]
+                    });
+                    expect(JSON.parse(connection.sentData[7])).toEqual({
+                        type: MessageType.Invocation,
+                        target: "test",
+                        arguments: [12]
+                    });
+                    expect(JSON.parse(connection.sentData[8])).toEqual({
+                        type: MessageType.Invocation,
+                        target: "test",
+                        arguments: [11]
+                    });
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("resends sent messages while disconnected on reconnect", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    // HubConnection should set these
+                    expect(connection.features.disconnected).toBeDefined();
+                    expect(connection.features.resend).toBeDefined();
+
+                    await hubConnection.send("test", 13);
+
+                    // Pretend TestConnection disconnected
+                    connection.features.disconnected();
+
+                    // Send while disconnected, waits until resend completes
+                    let sendTask = hubConnection.send("test", 22);
+                    let sendDone = false;
+                    sendTask = sendTask.finally(() => sendDone = true);
+
+                    expect(sendDone).toBeFalsy();
+
+                    await connection.features.resend();
+
+                    await sendTask;
+                    expect(sendDone).toBeTruthy();
+
+                    expect(connection.sentData.length).toBe(6);
+                    expect(JSON.parse(connection.sentData[3])).toEqual({
+                        type: MessageType.Sequence,
+                        sequenceId: 1,
+                    });
+                    expect(JSON.parse(connection.sentData[4])).toEqual({
+                        type: MessageType.Invocation,
+                        target: "test",
+                        arguments: [13]
+                    });
+                    expect(JSON.parse(connection.sentData[5])).toEqual({
+                        type: MessageType.Invocation,
+                        target: "test",
+                        arguments: [22]
+                    });
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("receiving ack removes buffered messages", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    // HubConnection should set these
+                    expect(connection.features.disconnected).toBeDefined();
+                    expect(connection.features.resend).toBeDefined();
+
+                    await hubConnection.send("test", 13);
+                    await hubConnection.send("test", 14);
+                    await hubConnection.send("test", 15);
+
+                    connection.receive({ type: MessageType.Ack, sequenceId: 2 });
+
+                    // Pretend TestConnection disconnected
+                    connection.features.disconnected();
+
+                    await connection.features.resend();
+
+                    expect(connection.sentData.length).toBe(7);
+                    expect(JSON.parse(connection.sentData[5])).toEqual({
+                        type: MessageType.Sequence,
+                        sequenceId: 3,
+                    });
+                    expect(JSON.parse(connection.sentData[6])).toEqual({
+                        type: MessageType.Invocation,
+                        target: "test",
+                        arguments: [15]
+                    });
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("sends ack after receiving message", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+
+                    await delayUntil(2000, () => connection.sentData.length === 3);
+
+                    expect(JSON.parse(connection.sentData[2])).toEqual({
+                        type: MessageType.Ack,
+                        sequenceId: 1,
+                    });
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("sends ack after receiving many messages", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+
+                    await delayUntil(2000, () => connection.sentData.length === 3);
+
+                    expect(JSON.parse(connection.sentData[2])).toEqual({
+                        type: MessageType.Ack,
+                        sequenceId: 4,
+                    });
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("messages ignored after reconnect if already received", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    let methodCalled = 0;
+                    hubConnection.on("t", () => {
+                        methodCalled++;
+                    });
+                    await hubConnection.start();
+
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+
+                    expect(methodCalled).toBe(2);
+
+                    // HubConnection should set these
+                    expect(connection.features.disconnected).toBeDefined();
+                    expect(connection.features.resend).toBeDefined();
+
+                    // Pretend TestConnection disconnected
+                    connection.features.disconnected();
+
+                    await connection.features.resend();
+
+                    connection.receive({ type: MessageType.Sequence, sequenceId: 1 });
+
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+
+                    expect(methodCalled).toBe(2);
+
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+                    expect(methodCalled).toBe(3);
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("messages ignored after reconnect if sequence message not received", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    let methodCalled = 0;
+                    hubConnection.on("t", () => {
+                        methodCalled++;
+                    });
+                    await hubConnection.start();
+
+                    // HubConnection should set these
+                    expect(connection.features.disconnected).toBeDefined();
+                    expect(connection.features.resend).toBeDefined();
+
+                    // Pretend TestConnection disconnected
+                    connection.features.disconnected();
+
+                    await connection.features.resend();
+
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+
+                    expect(methodCalled).toBe(0);
+
+                    connection.receive({ type: MessageType.Sequence, sequenceId: 1 });
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+
+                    expect(methodCalled).toBe(1);
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("sequence message updates what messages are ignored", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    let methodCalled = 0;
+                    hubConnection.on("t", () => {
+                        methodCalled++;
+                    });
+                    await hubConnection.start();
+
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+
+                    expect(methodCalled).toBe(2);
+
+                    // HubConnection should set these
+                    expect(connection.features.disconnected).toBeDefined();
+                    expect(connection.features.resend).toBeDefined();
+
+                    // Pretend TestConnection disconnected
+                    connection.features.disconnected();
+
+                    await connection.features.resend();
+
+                    connection.receive({ type: MessageType.Sequence, sequenceId: 2 });
+
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+                    expect(methodCalled).toBe(2);
+
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+
+                    expect(methodCalled).toBe(3);
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("sequence message with ID too high closes connection", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    let methodCalled = 0;
+                    hubConnection.on("t", () => {
+                        methodCalled++;
+                    });
+                    const closeError = new PromiseSource<Error | undefined>();
+                    hubConnection.onclose((e) => {
+                        closeError.reject(e);
+                    });
+                    await hubConnection.start();
+
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+                    connection.receive({ type: MessageType.Invocation, target: "t", arguments: [] });
+
+                    expect(methodCalled).toBe(2);
+
+                    // HubConnection should set these
+                    expect(connection.features.disconnected).toBeDefined();
+                    expect(connection.features.resend).toBeDefined();
+
+                    // Pretend TestConnection disconnected
+                    connection.features.disconnected();
+
+                    await connection.features.resend();
+
+                    connection.receive({ type: MessageType.Sequence, sequenceId: 4 });
+
+                    await expect(closeError).rejects.toThrow("Sequence ID greater than amount of messages we've received.");
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        [0, -1].forEach((sequenceId) => {
+            it(`sequence message with ID ${sequenceId} closes connection`, async () => {
+                await VerifyLogger.run(async (logger) => {
+                    const connection = new TestConnection();
+                    // tell HubConnection we "negotiated" reconnect
+                    connection.features.reconnect = true;
+
+                    const hubConnection = createHubConnection(connection, logger);
+                    try {
+                        const closeError = new PromiseSource<Error | undefined>();
+                        hubConnection.onclose((e) => {
+                            closeError.reject(e);
+                        });
+                        await hubConnection.start();
+
+                        connection.receive({ type: MessageType.Sequence, sequenceId });
+
+                        await expect(closeError).rejects.toThrow("Sequence ID must be greater than 0.");
+                    } finally {
+                        await hubConnection.stop();
+                    }
+                });
+            });
+        });
+
+        it("buffer full blocks sending, unblocks with ack", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    const closeError = new PromiseSource<Error | undefined>();
+                    hubConnection.onclose((e) => {
+                        closeError.resolve(e);
+                    });
+
+                    await hubConnection.start();
+
+                    // send large message to fill buffer, will be waiting until an ack occurs
+                    let sendTask = hubConnection.send("t", 'x'.repeat(100_000));
+                    let sendDone = false;
+                    sendTask = sendTask.finally(() => sendDone = true);
+
+                    await delayUntil(1);
+
+                    expect(sendDone).toBeFalsy();
+
+                    connection.receive({ type: MessageType.Ack, sequenceId: 1 });
+
+                    await sendTask;
+                    expect(sendDone).toBeTruthy();
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("buffer full blocks sending, unblocks with close message", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    const closeError = new PromiseSource<Error | undefined>();
+                    hubConnection.onclose((e) => {
+                        closeError.resolve(e);
+                    });
+
+                    await hubConnection.start();
+
+                    // send large message to fill buffer, will be waiting until an ack occurs
+                    let sendTask = hubConnection.send("t", 'x'.repeat(100_000));
+                    let sendDone = false;
+                    sendTask = sendTask.finally(() => sendDone = true);
+
+                    await delayUntil(1);
+
+                    expect(sendDone).toBeFalsy();
+
+                    connection.receive({ type: MessageType.Close, error: "test" });
+
+                    await expect(sendTask).rejects.toThrow("Server returned an error on close: test");
+                    expect(sendDone).toBeTruthy();
+
+                    expect(await closeError).toEqual(new Error("Server returned an error on close: test"));
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("buffer full blocks sending, unblocks when calling stop", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    await hubConnection.start();
+
+                    // send large message to fill buffer, will be waiting until an ack occurs
+                    let sendTask = hubConnection.send("t", 'x'.repeat(100_000));
+                    let sendDone = false;
+                    sendTask = sendTask.finally(() => sendDone = true);
+
+                    await delayUntil(1);
+
+                    expect(sendDone).toBeFalsy();
+
+                    await hubConnection.stop();
+
+                    await expect(sendTask).rejects.toThrow("Connection closed.");
+
+                    expect(sendDone).toBeTruthy();
+                } finally {
+                    await hubConnection.stop();
+                }
+            });
+        });
+
+        it("buffer full blocks sending, other sends also block promise but still send over connection", async () => {
+            await VerifyLogger.run(async (logger) => {
+                const connection = new TestConnection();
+                // tell HubConnection we "negotiated" reconnect
+                connection.features.reconnect = true;
+
+                const hubConnection = createHubConnection(connection, logger);
+                try {
+                    const closeError = new PromiseSource<Error | undefined>();
+                    hubConnection.onclose((e) => {
+                        closeError.resolve(e);
+                    });
+
+                    await hubConnection.start();
+
+                    // send large message to fill buffer, will be waiting until an ack occurs
+                    let sendTask = hubConnection.send("t", 'x'.repeat(100_000));
+                    let sendDone = false;
+                    sendTask = sendTask.finally(() => sendDone = true);
+
+                    await delayUntil(1);
+
+                    expect(sendDone).toBeFalsy();
+
+                    // send large message to fill buffer, will be waiting until an ack occurs
+                    const sendTask2 = hubConnection.send("t", 'x');
+                    let sendDone2 = false;
+                    sendTask2.finally(() => sendDone2 = true);
+
+                    await delayUntil(1);
+
+                    expect(sendDone2).toBeFalsy();
+
+                    expect(connection.sentData.length).toBe(4);
+                    expect(JSON.parse(connection.sentData[3])).toEqual({
+                        type: MessageType.Invocation,
+                        arguments: ['x'],
+                        target: 't'
+                    });
+
+                    connection.receive({ type: MessageType.Ack, sequenceId: 1 });
+
+                    await sendTask;
+                    expect(sendDone).toBeTruthy();
+
+                    // Second send is also unblocked because it is under the buffer limit once the large message is acked
+                    await sendTask2;
+                    expect(sendDone2).toBeTruthy();
                 } finally {
                     await hubConnection.stop();
                 }
@@ -1361,22 +2751,26 @@ class TestProtocol implements IHubProtocol {
     }
 
     public writeMessage(message: HubMessage): any {
-
+        if (message.type === 6 || message.type === 7) {
+            return `{"type": ${message.type}}` + TextMessageFormat.RecordSeparator;
+        } else {
+            throw new Error(`update TestProtocol to write message type ${message.type}`);
+        }
     }
 }
 
 class TestObserver implements IStreamSubscriber<any> {
     public readonly closed: boolean = false;
     public itemsReceived: any[];
-    private itemsSource: PromiseSource<any[]>;
+    private _itemsSource: PromiseSource<any[]>;
 
     get completed(): Promise<any[]> {
-        return this.itemsSource.promise;
+        return this._itemsSource.promise;
     }
 
     constructor() {
         this.itemsReceived = [];
-        this.itemsSource = new PromiseSource<any[]>();
+        this._itemsSource = new PromiseSource<any[]>();
     }
 
     public next(value: any) {
@@ -1384,11 +2778,11 @@ class TestObserver implements IStreamSubscriber<any> {
     }
 
     public error(err: any) {
-        this.itemsSource.reject(new Error(err));
+        this._itemsSource.reject(new Error(err));
     }
 
     public complete() {
-        this.itemsSource.resolve(this.itemsReceived);
+        this._itemsSource.resolve(this.itemsReceived);
     }
 }
 

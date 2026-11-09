@@ -1,81 +1,86 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Buffers;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
-namespace Microsoft.AspNetCore.Server.IIS.Core.IO
+namespace Microsoft.AspNetCore.Server.IIS.Core.IO;
+
+internal partial class WebSocketsAsyncIOEngine
 {
-    internal partial class WebSocketsAsyncIOEngine
+    internal sealed class WebSocketReadOperation : AsyncIOOperation, IDisposable
     {
-        internal class WebSocketReadOperation : AsyncIOOperation
+        [UnmanagedCallersOnly]
+        public static NativeMethods.REQUEST_NOTIFICATION_STATUS ReadCallback(IntPtr httpContext, IntPtr completionInfo, IntPtr completionContext)
         {
-            public static readonly NativeMethods.PFN_WEBSOCKET_ASYNC_COMPLETION ReadCallback = (httpContext, completionInfo, completionContext) =>
-            {
-                var context = (WebSocketReadOperation)GCHandle.FromIntPtr(completionContext).Target;
+            var context = (WebSocketReadOperation)GCHandle.FromIntPtr(completionContext).Target!;
 
-                NativeMethods.HttpGetCompletionInfo(completionInfo, out var cbBytes, out var hr);
+            NativeMethods.HttpGetCompletionInfo(completionInfo, out var cbBytes, out var hr);
 
-                var continuation = context.Complete(hr, cbBytes);
+            var continuation = context.Complete(hr, cbBytes);
 
-                continuation.Invoke();
+            continuation.Invoke();
 
-                return NativeMethods.REQUEST_NOTIFICATION_STATUS.RQ_NOTIFICATION_PENDING;
-            };
+            return NativeMethods.REQUEST_NOTIFICATION_STATUS.RQ_NOTIFICATION_PENDING;
+        }
 
-            private readonly WebSocketsAsyncIOEngine _engine;
-            private readonly GCHandle _thisHandle;
-            private MemoryHandle _inputHandle;
-            private IntPtr _requestHandler;
-            private Memory<byte> _memory;
+        private readonly WebSocketsAsyncIOEngine _engine;
+        private readonly GCHandle _thisHandle;
+        private MemoryHandle _inputHandle;
+        private NativeSafeHandle? _requestHandler;
+        private Memory<byte> _memory;
 
-            public WebSocketReadOperation(WebSocketsAsyncIOEngine engine)
-            {
-                _engine = engine;
-                _thisHandle = GCHandle.Alloc(this);
-            }
+        public WebSocketReadOperation(WebSocketsAsyncIOEngine engine)
+        {
+            _thisHandle = GCHandle.Alloc(this);
+            _engine = engine;
+        }
 
-            protected override unsafe bool InvokeOperation(out int hr, out int bytes)
-            {
-                _inputHandle = _memory.Pin();
+        protected override unsafe bool InvokeOperation(out int hr, out int bytes)
+        {
+            Debug.Assert(_requestHandler != null, "Must initialize first.");
 
-                hr = NativeMethods.HttpWebsocketsReadBytes(
-                    _requestHandler,
-                    (byte*)_inputHandle.Pointer,
-                    _memory.Length,
-                    ReadCallback,
-                    (IntPtr)_thisHandle,
-                    out bytes,
-                    out var completionExpected);
+            _inputHandle = _memory.Pin();
 
-                return !completionExpected;
-            }
+            hr = NativeMethods.HttpWebsocketsReadBytes(
+                _requestHandler,
+                (byte*)_inputHandle.Pointer,
+                _memory.Length,
+                &ReadCallback,
+                (IntPtr)_thisHandle,
+                out bytes,
+                out var completionExpected);
 
-            public void Initialize(IntPtr requestHandler, Memory<byte> memory)
-            {
-                _requestHandler = requestHandler;
-                _memory = memory;
-            }
+            return !completionExpected;
+        }
 
-            public override void FreeOperationResources(int hr, int bytes)
-            {
-                _inputHandle.Dispose();
-            }
+        public void Initialize(NativeSafeHandle requestHandler, Memory<byte> memory)
+        {
+            _requestHandler = requestHandler;
+            _memory = memory;
+        }
 
-            protected override void ResetOperation()
-            {
-                base.ResetOperation();
+        public override void FreeOperationResources(int hr, int bytes)
+        {
+            _inputHandle.Dispose();
+        }
 
-                _memory = default;
-                _inputHandle.Dispose();
-                _inputHandle = default;
-                _requestHandler = default;
+        protected override void ResetOperation()
+        {
+            base.ResetOperation();
 
-                _engine.ReturnOperation(this);
-            }
+            _memory = default;
+            _inputHandle.Dispose();
+            _inputHandle = default;
+            _requestHandler = default;
+        }
 
-            protected override bool IsSuccessfulResult(int hr) => hr == NativeMethods.ERROR_HANDLE_EOF;
+        protected override bool IsSuccessfulResult(int hr) => hr == NativeMethods.ERROR_HANDLE_EOF;
+
+        public void Dispose()
+        {
+            _thisHandle.Free();
         }
     }
 }

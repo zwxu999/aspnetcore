@@ -1,78 +1,113 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Threading;
-using Microsoft.AspNetCore.HttpSys.Internal;
+using System.Security.AccessControl;
 using Microsoft.Extensions.Logging;
+using Windows.Win32;
+using Windows.Win32.Networking.HttpServer;
+using Windows.Win32.Security;
 
-namespace Microsoft.AspNetCore.Server.HttpSys
+namespace Microsoft.AspNetCore.Server.HttpSys;
+
+internal sealed partial class RequestQueue
 {
-    internal class RequestQueue
+    private readonly RequestQueueMode _mode;
+    private readonly ILogger _logger;
+    private bool _disposed;
+
+    internal RequestQueue(string requestQueueName, ILogger logger)
+        : this(requestQueueName, RequestQueueMode.Attach, securityDescriptor: null, logger, receiver: true)
     {
-        private static readonly int BindingInfoSize =
-            Marshal.SizeOf<HttpApiTypes.HTTP_BINDING_INFO>();
+    }
 
-        private readonly RequestQueueMode _mode;
-        private readonly UrlGroup _urlGroup;
-        private readonly ILogger _logger;
-        private bool _disposed;
+    internal RequestQueue(string? requestQueueName, RequestQueueMode mode, GenericSecurityDescriptor? securityDescriptor, ILogger logger)
+        : this(requestQueueName, mode, securityDescriptor, logger, false)
+    { }
 
-        internal RequestQueue(UrlGroup urlGroup, string requestQueueName, RequestQueueMode mode, ILogger logger)
+    private RequestQueue(string? requestQueueName, RequestQueueMode mode, GenericSecurityDescriptor? securityDescriptor, ILogger logger, bool receiver)
+    {
+        _mode = mode;
+        _logger = logger;
+
+        var flags = 0u;
+        Created = true;
+
+        SECURITY_ATTRIBUTES? securityAttributes = null;
+        nint? pSecurityDescriptor = null;
+
+        try
         {
-            _mode = mode;
-            _urlGroup = urlGroup;
-            _logger = logger;
-
-            var flags = HttpApiTypes.HTTP_CREATE_REQUEST_QUEUE_FLAG.None;
-            Created = true;
             if (_mode == RequestQueueMode.Attach)
             {
-                flags = HttpApiTypes.HTTP_CREATE_REQUEST_QUEUE_FLAG.OpenExisting;
+                flags = PInvoke.HTTP_CREATE_REQUEST_QUEUE_FLAG_OPEN_EXISTING;
                 Created = false;
+                if (receiver)
+                {
+                    flags |= PInvoke.HTTP_CREATE_REQUEST_QUEUE_FLAG_DELEGATION;
+                }
+            }
+            else if (securityDescriptor is not null) // Create or CreateOrAttach
+            {
+                // Convert the security descriptor to a byte array
+                byte[] securityDescriptorBytes = new byte[securityDescriptor.BinaryLength];
+                securityDescriptor.GetBinaryForm(securityDescriptorBytes, 0);
+
+                // Allocate native memory for the security descriptor
+                pSecurityDescriptor = Marshal.AllocHGlobal(securityDescriptorBytes.Length);
+                Marshal.Copy(securityDescriptorBytes, 0, pSecurityDescriptor.Value, securityDescriptorBytes.Length);
+
+                unsafe
+                {
+                    securityAttributes = new SECURITY_ATTRIBUTES
+                    {
+                        nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
+                        lpSecurityDescriptor = pSecurityDescriptor.Value.ToPointer(),
+                        bInheritHandle = false
+                    };
+                }
             }
 
-            var statusCode = HttpApi.HttpCreateRequestQueue(
+            var statusCode = PInvoke.HttpCreateRequestQueue(
                     HttpApi.Version,
                     requestQueueName,
-                    null,
+                    securityAttributes,
                     flags,
                     out var requestQueueHandle);
 
-            if (_mode == RequestQueueMode.CreateOrAttach && statusCode == UnsafeNclNativeMethods.ErrorCodes.ERROR_ALREADY_EXISTS)
+            if (_mode == RequestQueueMode.CreateOrAttach && statusCode == ErrorCodes.ERROR_ALREADY_EXISTS)
             {
                 // Tried to create, but it already exists so attach to it instead.
                 Created = false;
-                flags = HttpApiTypes.HTTP_CREATE_REQUEST_QUEUE_FLAG.OpenExisting;
-                statusCode = HttpApi.HttpCreateRequestQueue(
+                flags = PInvoke.HTTP_CREATE_REQUEST_QUEUE_FLAG_OPEN_EXISTING;
+                statusCode = PInvoke.HttpCreateRequestQueue(
                         HttpApi.Version,
                         requestQueueName,
-                        null,
+                        SecurityAttributes: default, // Attaching should not pass any security attributes
                         flags,
                         out requestQueueHandle);
             }
 
-            if (flags == HttpApiTypes.HTTP_CREATE_REQUEST_QUEUE_FLAG.OpenExisting && statusCode == UnsafeNclNativeMethods.ErrorCodes.ERROR_FILE_NOT_FOUND)
+            if ((flags & PInvoke.HTTP_CREATE_REQUEST_QUEUE_FLAG_OPEN_EXISTING) != 0 && statusCode == ErrorCodes.ERROR_FILE_NOT_FOUND)
             {
                 throw new HttpSysException((int)statusCode, $"Failed to attach to the given request queue '{requestQueueName}', the queue could not be found.");
             }
-            else if (statusCode == UnsafeNclNativeMethods.ErrorCodes.ERROR_INVALID_NAME)
+            else if (statusCode == ErrorCodes.ERROR_INVALID_NAME)
             {
                 throw new HttpSysException((int)statusCode, $"The given request queue name '{requestQueueName}' is invalid.");
             }
-            else if (statusCode != UnsafeNclNativeMethods.ErrorCodes.ERROR_SUCCESS)
+            else if (statusCode != ErrorCodes.ERROR_SUCCESS)
             {
                 throw new HttpSysException((int)statusCode);
             }
 
             // Disabling callbacks when IO operation completes synchronously (returns ErrorCodes.ERROR_SUCCESS)
             if (HttpSysListener.SkipIOCPCallbackOnSuccess &&
-                !UnsafeNclNativeMethods.SetFileCompletionNotificationModes(
+                !PInvoke.SetFileCompletionNotificationModes(
                     requestQueueHandle,
-                    UnsafeNclNativeMethods.FileCompletionNotificationModes.SkipCompletionPortOnSuccess |
-                    UnsafeNclNativeMethods.FileCompletionNotificationModes.SkipSetEventOnHandle))
+                    (byte)(PInvoke.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS |
+                    PInvoke.FILE_SKIP_SET_EVENT_ON_HANDLE)))
             {
                 requestQueueHandle.Dispose();
                 throw new HttpSysException(Marshal.GetLastWin32Error());
@@ -83,105 +118,95 @@ namespace Microsoft.AspNetCore.Server.HttpSys
 
             if (!Created)
             {
-                _logger.LogInformation(LoggerEventIds.AttachedToQueue, "Attached to an existing request queue '{requestQueueName}', some options do not apply.", requestQueueName);
+                Log.AttachedToQueue(_logger, requestQueueName);
             }
         }
-
-        /// <summary>
-        /// True if this instace created the queue instead of attaching to an existing one.
-        /// </summary>
-        internal bool Created { get; }
-
-        internal SafeHandle Handle { get; }
-        internal ThreadPoolBoundHandle BoundHandle { get; }
-
-        internal unsafe void AttachToUrlGroup()
+        finally
         {
-            Debug.Assert(Created);
-            CheckDisposed();
-            // Set the association between request queue and url group. After this, requests for registered urls will 
-            // get delivered to this request queue.
-
-            var info = new HttpApiTypes.HTTP_BINDING_INFO();
-            info.Flags = HttpApiTypes.HTTP_FLAGS.HTTP_PROPERTY_FLAG_PRESENT;
-            info.RequestQueueHandle = Handle.DangerousGetHandle();
-
-            var infoptr = new IntPtr(&info);
-
-            _urlGroup.SetProperty(HttpApiTypes.HTTP_SERVER_PROPERTY.HttpServerBindingProperty,
-                infoptr, (uint)BindingInfoSize);
-        }
-
-        internal unsafe void DetachFromUrlGroup()
-        {
-            Debug.Assert(Created);
-            CheckDisposed();
-            // Break the association between request queue and url group. After this, requests for registered urls 
-            // will get 503s.
-            // Note that this method may be called multiple times (Stop() and then Abort()). This
-            // is fine since http.sys allows to set HttpServerBindingProperty multiple times for valid 
-            // Url groups.
-
-            var info = new HttpApiTypes.HTTP_BINDING_INFO();
-            info.Flags = HttpApiTypes.HTTP_FLAGS.NONE;
-            info.RequestQueueHandle = IntPtr.Zero;
-
-            var infoptr = new IntPtr(&info);
-
-            _urlGroup.SetProperty(HttpApiTypes.HTTP_SERVER_PROPERTY.HttpServerBindingProperty,
-                infoptr, (uint)BindingInfoSize, throwOnError: false);
-        }
-
-        // The listener must be active for this to work.
-        internal unsafe void SetLengthLimit(long length)
-        {
-            Debug.Assert(Created);
-            CheckDisposed();
-
-            var result = HttpApi.HttpSetRequestQueueProperty(Handle,
-                HttpApiTypes.HTTP_SERVER_PROPERTY.HttpServerQueueLengthProperty,
-                new IntPtr((void*)&length), (uint)Marshal.SizeOf<long>(), 0, IntPtr.Zero);
-
-            if (result != 0)
+            if (pSecurityDescriptor is not null)
             {
-                throw new HttpSysException((int)result);
+                // Free the allocated memory for the security descriptor
+                Marshal.FreeHGlobal(pSecurityDescriptor.Value);
             }
         }
+    }
 
-        // The listener must be active for this to work.
-        internal unsafe void SetRejectionVerbosity(Http503VerbosityLevel verbosity)
+    /// <summary>
+    /// True if this instance created the queue instead of attaching to an existing one.
+    /// </summary>
+    internal bool Created { get; }
+
+    internal SafeHandle Handle { get; }
+    internal ThreadPoolBoundHandle BoundHandle { get; }
+
+    // The listener must be active for this to work.
+    internal unsafe void SetLengthLimit(long length)
+    {
+        Debug.Assert(Created);
+        CheckDisposed();
+
+        var result = PInvoke.HttpSetRequestQueueProperty(Handle,
+            HTTP_SERVER_PROPERTY.HttpServerQueueLengthProperty,
+            new ReadOnlySpan<byte>(&length, sizeof(long)));
+
+        if (result != 0)
         {
-            Debug.Assert(Created);
-            CheckDisposed();
-
-            var result = HttpApi.HttpSetRequestQueueProperty(Handle,
-                HttpApiTypes.HTTP_SERVER_PROPERTY.HttpServer503VerbosityProperty,
-                new IntPtr((void*)&verbosity), (uint)Marshal.SizeOf<long>(), 0, IntPtr.Zero);
-
-            if (result != 0)
-            {
-                throw new HttpSysException((int)result);
-            }
+            throw new HttpSysException((int)result);
         }
+    }
 
-        public void Dispose()
+    // The listener must be active for this to work.
+    internal unsafe void SetRejectionVerbosity(Http503VerbosityLevel verbosity)
+    {
+        Debug.Assert(Created);
+        CheckDisposed();
+
+        var verbosityLong = (long)verbosity;
+        var result = PInvoke.HttpSetRequestQueueProperty(Handle,
+            HTTP_SERVER_PROPERTY.HttpServer503VerbosityProperty,
+            new ReadOnlySpan<byte>(&verbosityLong, sizeof(long)));
+
+        if (result != 0)
         {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _disposed = true;
-            BoundHandle.Dispose();
-            Handle.Dispose();
+            throw new HttpSysException((int)result);
         }
+    }
 
-        private void CheckDisposed()
+    public void Dispose()
+    {
+        if (_disposed)
         {
-            if (_disposed)
-            {
-                throw new ObjectDisposedException(this.GetType().FullName);
-            }
+            return;
         }
+
+        _disposed = true;
+
+        // Close the request queue handle first to cancel any pending IO operations.
+        // This must happen before disposing BoundHandle, as pending operations need
+        // to be cancelled and cleaned up using the BoundHandle.
+        Handle.Dispose();
+
+        BoundHandle.Dispose();
+    }
+
+    /// <summary>
+    /// Shuts down the request queue to cancel any pending IO operations,
+    /// but does not close the handle or dispose the BoundHandle. This allows pending operations
+    /// to be properly cleaned up before disposing the BoundHandle.
+    /// </summary>
+    internal void StopProcessingRequests()
+    {
+        PInvoke.HttpShutdownRequestQueue(Handle);
+    }
+
+    private void CheckDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+
+    private static partial class Log
+    {
+        [LoggerMessage(LoggerEventIds.AttachedToQueue, LogLevel.Information, "Attached to an existing request queue '{RequestQueueName}', some options do not apply.", EventName = "AttachedToQueue")]
+        public static partial void AttachedToQueue(ILogger logger, string? requestQueueName);
     }
 }

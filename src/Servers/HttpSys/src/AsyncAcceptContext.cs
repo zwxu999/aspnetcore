@@ -1,194 +1,287 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
-using System.Diagnostics.CodeAnalysis;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.HttpSys.Internal;
+using System.Diagnostics;
+using System.Threading.Tasks.Sources;
+using Microsoft.Extensions.Logging;
 
-namespace Microsoft.AspNetCore.Server.HttpSys
+namespace Microsoft.AspNetCore.Server.HttpSys;
+
+internal sealed unsafe partial class AsyncAcceptContext : IValueTaskSource<RequestContext>, IDisposable
 {
-    internal unsafe class AsyncAcceptContext : TaskCompletionSource<RequestContext>, IDisposable
+    private static readonly IOCompletionCallback IOCallback = IOWaitCallback;
+    private readonly PreAllocatedOverlapped _preallocatedOverlapped;
+    private readonly IRequestContextFactory _requestContextFactory;
+    private readonly ILogger _logger;
+    private int _expectedCompletionCount;
+
+    private NativeOverlapped* _overlapped;
+
+    private readonly bool _logExpectationFailures = AppContext.TryGetSwitch(
+        "Microsoft.AspNetCore.Server.HttpSys.LogAcceptExpectationFailure", out var enabled) && enabled;
+
+    // mutable struct; do not make this readonly
+    private ManualResetValueTaskSourceCore<RequestContext> _mrvts = new()
     {
-        internal static readonly IOCompletionCallback IOCallback = new IOCompletionCallback(IOWaitCallback);
+        // We want to run continuations on the IO threads
+        RunContinuationsAsynchronously = false
+    };
 
-        private NativeRequestContext _nativeRequestContext;
+    private RequestContext? _requestContext;
 
-        internal AsyncAcceptContext(HttpSysListener server)
+    internal AsyncAcceptContext(HttpSysListener server, IRequestContextFactory requestContextFactory, ILogger logger)
+    {
+        Server = server;
+        _requestContextFactory = requestContextFactory;
+        _preallocatedOverlapped = new(IOCallback, state: this, pinData: null);
+        _logger = logger;
+    }
+
+    internal HttpSysListener Server { get; }
+
+    internal ValueTask<RequestContext> AcceptAsync()
+    {
+        _mrvts.Reset();
+
+        AllocateNativeRequest();
+
+        var statusCode = QueueBeginGetContext();
+        if (statusCode != ErrorCodes.ERROR_SUCCESS &&
+            statusCode != ErrorCodes.ERROR_IO_PENDING)
         {
-            Server = server;
-            AllocateNativeRequest();
+            // some other bad error, possible(?) return values are:
+            // ERROR_INVALID_HANDLE, ERROR_INSUFFICIENT_BUFFER, ERROR_OPERATION_ABORTED
+            return ValueTask.FromException<RequestContext>(new HttpSysException((int)statusCode));
         }
 
-        internal HttpSysListener Server { get; }
+        return new ValueTask<RequestContext>(this, _mrvts.Version);
+    }
 
-        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "Redirecting to callback")]
-        [SuppressMessage("Microsoft.Reliability", "CA2000:Dispose objects before losing scope", Justification = "Disposed by callback")]
-        private static void IOCompleted(AsyncAcceptContext asyncContext, uint errorCode, uint numBytes)
+    private void IOCompleted(uint errorCode, uint numBytes, bool managed)
+    {
+        try
         {
-            bool complete = false;
+            ObserveCompletion(managed); // expectation tracking
+            if (errorCode != ErrorCodes.ERROR_SUCCESS &&
+                errorCode != ErrorCodes.ERROR_MORE_DATA)
+            {
+                // (keep all the error handling in one place)
+                throw new HttpSysException((int)errorCode);
+            }
+
+            Debug.Assert(_requestContext != null);
+
+            if (errorCode == ErrorCodes.ERROR_SUCCESS)
+            {
+                var requestContext = _requestContext;
+                // It's important that we clear the request context before we set the result
+                // we want to reuse the acceptContext object for future accepts.
+                _requestContext = null;
+
+                try
+                {
+                    _mrvts.SetResult(requestContext);
+                }
+                catch (Exception ex)
+                {
+                    Log.AcceptSetResultFailed(_logger, ex);
+                }
+            }
+            else
+            {
+                //  (uint)backingBuffer.Length - AlignmentPadding
+                AllocateNativeRequest(numBytes, _requestContext.RequestId);
+
+                // We need to issue a new request, either because auth failed, or because our buffer was too small the first time.
+                var statusCode = QueueBeginGetContext();
+
+                if (statusCode != ErrorCodes.ERROR_SUCCESS &&
+                    statusCode != ErrorCodes.ERROR_IO_PENDING)
+                {
+                    // some other bad error, possible(?) return values are:
+                    // ERROR_INVALID_HANDLE, ERROR_INSUFFICIENT_BUFFER, ERROR_OPERATION_ABORTED
+                    // (keep all the error handling in one place)
+                    throw new HttpSysException((int)statusCode);
+                }
+            }
+        }
+        catch (Exception exception)
+        {
             try
             {
-                if (errorCode != UnsafeNclNativeMethods.ErrorCodes.ERROR_SUCCESS &&
-                    errorCode != UnsafeNclNativeMethods.ErrorCodes.ERROR_MORE_DATA)
-                {
-                    asyncContext.TrySetException(new HttpSysException((int)errorCode));
-                    complete = true;
-                }
-                else
-                {
-                    HttpSysListener server = asyncContext.Server;
-                    if (errorCode == UnsafeNclNativeMethods.ErrorCodes.ERROR_SUCCESS)
-                    {
-                        // at this point we have received an unmanaged HTTP_REQUEST and memoryBlob
-                        // points to it we need to hook up our authentication handling code here.
-                        try
-                        {
-                            if (server.ValidateRequest(asyncContext._nativeRequestContext) && server.ValidateAuth(asyncContext._nativeRequestContext))
-                            {
-                                RequestContext requestContext = new RequestContext(server, asyncContext._nativeRequestContext);
-                                asyncContext.TrySetResult(requestContext);
-                                complete = true;
-                            }
-                        }
-                        catch (Exception)
-                        {
-                            server.SendError(asyncContext._nativeRequestContext.RequestId, StatusCodes.Status400BadRequest);
-                            throw;
-                        }
-                        finally
-                        {
-                            // The request has been handed to the user, which means this code can't reuse the blob.  Reset it here.
-                            if (complete)
-                            {
-                                asyncContext._nativeRequestContext = null;
-                            }
-                            else
-                            {
-                                asyncContext.AllocateNativeRequest(size: asyncContext._nativeRequestContext.Size);
-                            }
-                        }
-                    }
-                    else
-                    {
-                        //  (uint)backingBuffer.Length - AlignmentPadding
-                        asyncContext.AllocateNativeRequest(numBytes, asyncContext._nativeRequestContext.RequestId);
-                    }
-
-                    // We need to issue a new request, either because auth failed, or because our buffer was too small the first time.
-                    if (!complete)
-                    {
-                        uint statusCode = asyncContext.QueueBeginGetContext();
-                        if (statusCode != UnsafeNclNativeMethods.ErrorCodes.ERROR_SUCCESS &&
-                            statusCode != UnsafeNclNativeMethods.ErrorCodes.ERROR_IO_PENDING)
-                        {
-                            // someother bad error, possible(?) return values are:
-                            // ERROR_INVALID_HANDLE, ERROR_INSUFFICIENT_BUFFER, ERROR_OPERATION_ABORTED
-                            asyncContext.TrySetException(new HttpSysException((int)statusCode));
-                            complete = true;
-                        }
-                    }
-                    if (!complete)
-                    {
-                        return;
-                    }
-                }
-
-                if (complete)
-                {
-                    asyncContext.Dispose();
-                }
+                _mrvts.SetException(exception);
             }
-            catch (Exception exception)
+            catch (Exception ex)
             {
-                // Logged by caller
-                asyncContext.TrySetException(exception);
-                asyncContext.Dispose();
+                Log.AcceptSetResultFailed(_logger, ex);
             }
         }
+    }
 
-        private static unsafe void IOWaitCallback(uint errorCode, uint numBytes, NativeOverlapped* nativeOverlapped)
-        {
-            // take the ListenerAsyncResult object from the state
-            var asyncResult = (AsyncAcceptContext)ThreadPoolBoundHandle.GetNativeOverlappedState(nativeOverlapped);
-            IOCompleted(asyncResult, errorCode, numBytes);
-        }
+    private static unsafe void IOWaitCallback(uint errorCode, uint numBytes, NativeOverlapped* nativeOverlapped)
+    {
+        var acceptContext = (AsyncAcceptContext)ThreadPoolBoundHandle.GetNativeOverlappedState(nativeOverlapped)!;
+        acceptContext.IOCompleted(errorCode, numBytes, false);
+    }
 
-        internal uint QueueBeginGetContext()
+    private void SetExpectCompletion() // we anticipate a completion *might* occur
+    {
+        // note this is intentionally a "reset and check" rather than Increment, so that we don't spam
+        // the logs forever if a glitch occurs
+        var value = Interlocked.Exchange(ref _expectedCompletionCount, 1); // should have been 0
+        if (value != 0)
         {
-            uint statusCode = UnsafeNclNativeMethods.ErrorCodes.ERROR_SUCCESS;
-            bool retry;
-            do
+            if (_logExpectationFailures)
             {
-                retry = false;
-                uint bytesTransferred = 0;
-                statusCode = HttpApi.HttpReceiveHttpRequest(
-                    Server.RequestQueue.Handle,
-                    _nativeRequestContext.RequestId,
-                    (uint)HttpApiTypes.HTTP_FLAGS.HTTP_RECEIVE_REQUEST_FLAG_COPY_BODY,
-                    _nativeRequestContext.NativeRequest,
-                    _nativeRequestContext.Size,
-                    &bytesTransferred,
-                    _nativeRequestContext.NativeOverlapped);
+                Log.AcceptSetExpectationMismatch(_logger, value);
+            }
+            Debug.Assert(false, nameof(SetExpectCompletion)); // fail hard in debug
+        }
+    }
+    private void CancelExpectCompletion() // due to error-code etc, we no longer anticipate a completion
+    {
+        var value = Interlocked.Decrement(ref _expectedCompletionCount); // should have been 1, so now 0
+        if (value != 0)
+        {
+            if (_logExpectationFailures)
+            {
+                Log.AcceptCancelExpectationMismatch(_logger, value);
+            }
+            Debug.Assert(false, nameof(CancelExpectCompletion)); // fail hard in debug
+        }
+    }
+    private void ObserveCompletion(bool managed) // a completion was invoked
+    {
+        var value = Interlocked.Decrement(ref _expectedCompletionCount); // should have been 1, so now 0
+        if (value != 0)
+        {
+            if (_logExpectationFailures)
+            {
+                Log.AcceptObserveExpectationMismatch(_logger, managed ? "managed" : "unmanaged", value);
+            }
+            Debug.Assert(false, nameof(ObserveCompletion)); // fail hard in debug
+        }
+    }
 
-                if (statusCode == UnsafeNclNativeMethods.ErrorCodes.ERROR_INVALID_PARAMETER && _nativeRequestContext.RequestId != 0)
-                {
+    private uint QueueBeginGetContext()
+    {
+        uint statusCode;
+        bool retry;
+        do
+        {
+            Debug.Assert(_requestContext != null);
+
+            retry = false;
+            uint bytesTransferred = 0;
+            SetExpectCompletion(); // track this *before*, because of timing vs IOCP (could even be effectively synchronous)
+            statusCode = HttpApi.HttpReceiveHttpRequest(
+                Server.RequestQueue.Handle,
+                _requestContext.RequestId,
+                // Small perf impact by not using HTTP_RECEIVE_REQUEST_FLAG_COPY_BODY
+                // if the request sends header+body in a single TCP packet
+                0u,
+                _requestContext.NativeRequest,
+                _requestContext.Size,
+                &bytesTransferred,
+                _overlapped);
+
+            switch (statusCode)
+            {
+                case (ErrorCodes.ERROR_CONNECTION_INVALID or ErrorCodes.ERROR_INVALID_PARAMETER) when _requestContext.RequestId != 0:
+                    // ERROR_CONNECTION_INVALID:
+                    // The client reset the connection between the time we got the MORE_DATA error and when we called HttpReceiveHttpRequest
+                    // with the new buffer. We can clear the request id and move on to the next request.
+                    //
+                    // ERROR_INVALID_PARAMETER: Historical check from HttpListener.
+                    // https://referencesource.microsoft.com/#System/net/System/Net/_ListenerAsyncResult.cs,137
                     // we might get this if somebody stole our RequestId,
                     // set RequestId to 0 and start all over again with the buffer we just allocated
                     // BUGBUG: how can someone steal our request ID?  seems really bad and in need of fix.
-                    _nativeRequestContext.RequestId = 0;
+                    CancelExpectCompletion();
+                    _requestContext.RequestId = 0;
                     retry = true;
-                }
-                else if (statusCode == UnsafeNclNativeMethods.ErrorCodes.ERROR_MORE_DATA)
-                {
+                    break;
+                case ErrorCodes.ERROR_MORE_DATA:
                     // the buffer was not big enough to fit the headers, we need
                     // to read the RequestId returned, allocate a new buffer of the required size
                     //  (uint)backingBuffer.Length - AlignmentPadding
+                    CancelExpectCompletion(); // we'll "expect" again when we retry
                     AllocateNativeRequest(bytesTransferred);
                     retry = true;
-                }
-                else if (statusCode == UnsafeNclNativeMethods.ErrorCodes.ERROR_SUCCESS
-                    && HttpSysListener.SkipIOCPCallbackOnSuccess)
-                {
-                    // IO operation completed synchronously - callback won't be called to signal completion.
-                    IOCompleted(this, statusCode, bytesTransferred);
-                }
+                    break;
+                case ErrorCodes.ERROR_SUCCESS:
+                    if (HttpSysListener.SkipIOCPCallbackOnSuccess)
+                    {
+                        // IO operation completed synchronously - callback won't be called to signal completion.
+                        IOCompleted(statusCode, bytesTransferred, true); // marks completion
+                    }
+                    // else: callback fired by IOCP (at some point), which marks completion
+                    break;
+                case ErrorCodes.ERROR_IO_PENDING:
+                    break; // no change to state - callback will occur at some point
+                default:
+                    // fault code, not expecting an IOCP callback
+                    CancelExpectCompletion();
+                    break;
             }
-            while (retry);
-            return statusCode;
+        }
+        while (retry);
+        return statusCode;
+    }
+
+    private void AllocateNativeRequest(uint? size = null, ulong requestId = 0)
+    {
+        _requestContext?.ReleasePins();
+        _requestContext?.Dispose();
+
+        var boundHandle = Server.RequestQueue.BoundHandle;
+        if (_overlapped != null)
+        {
+            boundHandle.FreeNativeOverlapped(_overlapped);
         }
 
-        internal void AllocateNativeRequest(uint? size = null, ulong requestId = 0)
+        _requestContext = _requestContextFactory.CreateRequestContext(size, requestId);
+        _overlapped = boundHandle.AllocateNativeOverlapped(_preallocatedOverlapped);
+    }
+
+    public void Dispose()
+    {
+        Dispose(true);
+    }
+
+    private void Dispose(bool disposing)
+    {
+        if (disposing)
         {
-            _nativeRequestContext?.ReleasePins();
-            _nativeRequestContext?.Dispose();
-
-            // We can't reuse overlapped objects
-            var boundHandle = Server.RequestQueue.BoundHandle;
-            var nativeOverlapped = new SafeNativeOverlapped(boundHandle,
-                boundHandle.AllocateNativeOverlapped(IOCallback, this, pinData: null));
-
-            // nativeRequest
-            _nativeRequestContext = new NativeRequestContext(nativeOverlapped, Server.MemoryPool, size, requestId);
-        }
-
-        public void Dispose()
-        {
-            Dispose(true);
-        }
-
-        protected virtual void Dispose(bool disposing)
-        {
-            if (disposing)
+            if (_requestContext != null)
             {
-                if (_nativeRequestContext != null)
-                {
-                    _nativeRequestContext.ReleasePins();
-                    _nativeRequestContext.Dispose();
-                }
+                _requestContext.ReleasePins();
+                _requestContext.Dispose();
+                _requestContext = null;
+            }
+
+            var boundHandle = Server.RequestQueue.BoundHandle;
+
+            if (_overlapped != null)
+            {
+                boundHandle.FreeNativeOverlapped(_overlapped);
+                _overlapped = null;
             }
         }
+    }
+
+    public RequestContext GetResult(short token)
+    {
+        return _mrvts.GetResult(token);
+    }
+
+    public ValueTaskSourceStatus GetStatus(short token)
+    {
+        return _mrvts.GetStatus(token);
+    }
+
+    public void OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
+    {
+        _mrvts.OnCompleted(continuation, state, token, flags);
     }
 }

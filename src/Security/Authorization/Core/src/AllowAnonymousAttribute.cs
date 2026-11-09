@@ -1,15 +1,24 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Diagnostics;
 
-namespace Microsoft.AspNetCore.Authorization
+namespace Microsoft.AspNetCore.Authorization;
+
+/// <summary>
+/// Specifies that the class or method that this attribute is applied to does not require authorization.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = false, Inherited = true)]
+[DebuggerDisplay("{ToString(),nq}")]
+public class AllowAnonymousAttribute : Attribute, IAllowAnonymous
 {
     /// <summary>
-    /// Specifies that the class or method that this attribute is applied to does not require authorization.
+    /// Returns a string that represents the current attribute.
     /// </summary>
-    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = false, Inherited = true)]
-    public class AllowAnonymousAttribute : Attribute, IAllowAnonymous
+    /// <returns>The string <c>AllowAnonymous</c>.</returns>
+    public override string ToString()
     {
+        return "AllowAnonymous";
     }
 }

@@ -1,32 +1,75 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-namespace Microsoft.AspNetCore.Components.Analyzers
+namespace Microsoft.AspNetCore.Components.Analyzers;
+
+// Constants for type and method names used in code-generation
+// Keep these in sync with the actual definitions
+internal static class ComponentsApi
 {
-    // Constants for type and method names used in code-generation
-    // Keep these in sync with the actual definitions
-    internal static class ComponentsApi
+    public const string AssemblyName = "Microsoft.AspNetCore.Components";
+
+    public static class ParameterAttribute
     {
-        public static readonly string AssemblyName = "Microsoft.AspNetCore.Components";
+        public const string FullTypeName = "Microsoft.AspNetCore.Components.ParameterAttribute";
+        public const string MetadataName = FullTypeName;
 
-        public static class ParameterAttribute
-        {
-            public static readonly string FullTypeName = "Microsoft.AspNetCore.Components.ParameterAttribute";
-            public static readonly string MetadataName = FullTypeName;
+        public const string CaptureUnmatchedValues = "CaptureUnmatchedValues";
+    }
 
-            public static readonly string CaptureUnmatchedValues = "CaptureUnmatchedValues";
-        }
+    public static class CascadingParameterAttribute
+    {
+        public const string FullTypeName = "Microsoft.AspNetCore.Components.CascadingParameterAttribute";
+        public const string MetadataName = FullTypeName;
+    }
 
-        public static class CascadingParameterAttribute
-        {
-            public static readonly string FullTypeName = "Microsoft.AspNetCore.Components.CascadingParameterAttribute";
-            public static readonly string MetadataName = FullTypeName;
-        }
+    public static class SupplyParameterFromFormAttribute
+    {
+        public const string FullTypeName = "Microsoft.AspNetCore.Components.SupplyParameterFromFormAttribute";
+        public const string MetadataName = FullTypeName;
+    }
 
-        public static class IComponent
-        {
-            public static readonly string FullTypeName = "Microsoft.AspNetCore.Components.IComponent";
-            public static readonly string MetadataName = FullTypeName;
-        }
+    public static class ComponentBase
+    {
+        public const string FullTypeName = "Microsoft.AspNetCore.Components.ComponentBase";
+        public const string MetadataName = FullTypeName;
+    }
+
+    public static class PersistentStateAttribute
+    {
+        public const string FullTypeName = "Microsoft.AspNetCore.Components.PersistentStateAttribute";
+        public const string MetadataName = FullTypeName;
+    }
+
+    public static class IComponent
+    {
+        public const string FullTypeName = "Microsoft.AspNetCore.Components.IComponent";
+        public const string MetadataName = FullTypeName;
+    }
+
+    public static class AuthenticationStateProvider
+    {
+        public const string FullTypeName = "Microsoft.AspNetCore.Components.Authorization.AuthenticationStateProvider";
+        public const string MetadataName = FullTypeName;
+        public const string AuthenticationStateChanged = "AuthenticationStateChanged";
+        public const string GetAuthenticationStateAsync = "GetAuthenticationStateAsync";
+    }
+
+    public static class BindConverter
+    {
+        public const string FullTypeName = "Microsoft.AspNetCore.Components.BindConverter";
+        public const string MetadataName = FullTypeName;
+    }
+
+    public static class EventCallbackFactory
+    {
+        public const string FullTypeName = "Microsoft.AspNetCore.Components.EventCallbackFactory";
+        public const string MetadataName = FullTypeName;
+    }
+
+    public static class RenderTreeBuilder
+    {
+        public const string FullTypeName = "Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder";
+        public const string MetadataName = FullTypeName;
     }
 }

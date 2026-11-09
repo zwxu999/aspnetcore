@@ -1,48 +1,48 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System.IO;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
-namespace ErrorPageMiddlewareWebSite
+namespace ErrorPageMiddlewareWebSite;
+
+public class Startup
 {
-    public class Startup
+    // Set up application services
+    public void ConfigureServices(IServiceCollection services)
     {
-        // Set up application services
-        public void ConfigureServices(IServiceCollection services)
-        {
-            services.AddControllersWithViews()
-                .AddRazorRuntimeCompilation()
-                .SetCompatibilityVersion(CompatibilityVersion.Latest);
-        }
-
-        public void Configure(IApplicationBuilder app)
-        {
-            app.UseDeveloperExceptionPage();
-            app.UseRouting();
-            app.UseEndpoints(endpoints =>
-            {
-                endpoints.MapControllers();
-            });
-        }
-
-        public static void Main(string[] args)
-        {
-            var host = CreateWebHostBuilder(args)
-                .Build();
-
-            host.Run();
-        }
-
-        public static IWebHostBuilder CreateWebHostBuilder(string[] args) =>
-            new WebHostBuilder()
-                .UseContentRoot(Directory.GetCurrentDirectory())
-                .UseStartup<Startup>()
-                .UseKestrel()
-                .UseIISIntegration();
+#pragma warning disable ASPDEPR003 // Type or member is obsolete
+        services.AddControllersWithViews()
+            .AddRazorRuntimeCompilation();
+#pragma warning restore ASPDEPR003 // Type or member is obsolete
     }
+
+    public void Configure(IApplicationBuilder app)
+    {
+        app.UseDeveloperExceptionPage();
+        app.UseRouting();
+        app.UseEndpoints(endpoints =>
+        {
+            endpoints.MapControllers();
+        });
+    }
+
+    public static void Main(string[] args)
+    {
+        using var host = CreateHostBuilder(args)
+            .Build();
+
+        host.Run();
+    }
+
+    public static IHostBuilder CreateHostBuilder(string[] args) =>
+        new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
+            {
+                webHostBuilder
+                    .UseContentRoot(Directory.GetCurrentDirectory())
+                    .UseStartup<Startup>()
+                    .UseKestrel()
+                    .UseIISIntegration();
+            });
 }
 

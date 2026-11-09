@@ -1,103 +1,75 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Negotiate;
+using Microsoft.AspNetCore.Authentication.Negotiate.Internal;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
-namespace Microsoft.Extensions.DependencyInjection
+namespace Microsoft.Extensions.DependencyInjection;
+
+/// <summary>
+/// Extensions for enabling Negotiate authentication.
+/// </summary>
+public static class NegotiateExtensions
 {
     /// <summary>
-    /// Extensions for enabling Negotiate authentication.
+    /// Configures the <see cref="AuthenticationBuilder"/> to use Negotiate (also known as Windows, Kerberos, or NTLM) authentication
+    /// using the default scheme from <see cref="NegotiateDefaults.AuthenticationScheme"/>.
+    /// <para>
+    /// This authentication handler supports Kerberos on Windows and Linux servers.
+    /// </para>
     /// </summary>
-    public static class NegotiateExtensions
+    /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
+    /// <returns>The original builder.</returns>
+    public static AuthenticationBuilder AddNegotiate(this AuthenticationBuilder builder)
+        => builder.AddNegotiate(NegotiateDefaults.AuthenticationScheme, _ => { });
+
+    /// <summary>
+    /// Configures the <see cref="AuthenticationBuilder"/> to use Negotiate (also known as Windows, Kerberos, or NTLM) authentication
+    /// using the default scheme. The default scheme is specified by <see cref="NegotiateDefaults.AuthenticationScheme"/>.
+    /// <para>
+    /// This authentication handler supports Kerberos on Windows and Linux servers.
+    /// </para>
+    /// </summary>
+    /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
+    /// <param name="configureOptions">Allows for configuring the authentication handler.</param>
+    /// <returns>The original builder.</returns>
+    public static AuthenticationBuilder AddNegotiate(this AuthenticationBuilder builder, Action<NegotiateOptions> configureOptions)
+        => builder.AddNegotiate(NegotiateDefaults.AuthenticationScheme, configureOptions);
+
+    /// <summary>
+    /// Configures the <see cref="AuthenticationBuilder"/> to use Negotiate (also known as Windows, Kerberos, or NTLM) authentication
+    /// using the specified authentication scheme.
+    /// <para>
+    /// This authentication handler supports Kerberos on Windows and Linux servers.
+    /// </para>
+    /// </summary>
+    /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
+    /// <param name="authenticationScheme">The scheme name used to identify the authentication handler internally.</param>
+    /// <param name="configureOptions">Allows for configuring the authentication handler.</param>
+    /// <returns>The original builder.</returns>
+    public static AuthenticationBuilder AddNegotiate(this AuthenticationBuilder builder, string authenticationScheme, Action<NegotiateOptions> configureOptions)
+        => builder.AddNegotiate(authenticationScheme, displayName: null, configureOptions: configureOptions);
+
+    /// <summary>
+    /// Configures the <see cref="AuthenticationBuilder"/> to use Negotiate (also known as Windows, Kerberos, or NTLM) authentication
+    /// using the specified authentication scheme.
+    /// <para>
+    /// This authentication handler supports Kerberos on Windows and Linux servers.
+    /// </para>
+    /// </summary>
+    /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
+    /// <param name="authenticationScheme">The scheme name used to identify the authentication handler internally.</param>
+    /// <param name="displayName">The name displayed to users when selecting an authentication handler. The default is null to prevent this from displaying.</param>
+    /// <param name="configureOptions">Allows for configuring the authentication handler.</param>
+    /// <returns>The original builder.</returns>
+    public static AuthenticationBuilder AddNegotiate(this AuthenticationBuilder builder, string authenticationScheme, string? displayName, Action<NegotiateOptions> configureOptions)
     {
-        /// <summary>
-        /// Adds Negotiate authentication.
-        /// </summary>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <returns>The original builder.</returns>
-        public static AuthenticationBuilder AddNegotiate(this AuthenticationBuilder builder)
-            => builder.AddNegotiate(NegotiateDefaults.AuthenticationScheme, _ => { });
-
-        /// <summary>
-        /// Adds and configures Negotiate authentication.
-        /// </summary>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <param name="configureOptions">Allows for configuring the authentication handler.</param>
-        /// <returns>The original builder.</returns>
-        public static AuthenticationBuilder AddNegotiate(this AuthenticationBuilder builder, Action<NegotiateOptions> configureOptions)
-            => builder.AddNegotiate(NegotiateDefaults.AuthenticationScheme, configureOptions);
-
-        /// <summary>
-        /// Adds and configures Negotiate authentication.
-        /// </summary>
-        /// <typeparam name="TService">TService: A service resolved from the IServiceProvider for use when configuring this authentication provider. If you need multiple services then specify IServiceProvider and resolve them directly.</typeparam>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <param name="configureOptions">Allows for configuring the authentication handler.</param>
-        /// <returns>The original builder.</returns>
-        public static AuthenticationBuilder AddNegotiate<TService>(this AuthenticationBuilder builder, Action<NegotiateOptions, TService> configureOptions) where TService : class
-            => builder.AddNegotiate(NegotiateDefaults.AuthenticationScheme, configureOptions);
-
-        /// <summary>
-        /// Adds and configures Negotiate authentication.
-        /// </summary>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <param name="authenticationScheme">The scheme name used to identify the authentication handler internally.</param>
-        /// <param name="configureOptions">Allows for configuring the authentication handler.</param>
-        /// <returns>The original builder.</returns>
-        public static AuthenticationBuilder AddNegotiate(this AuthenticationBuilder builder, string authenticationScheme, Action<NegotiateOptions> configureOptions)
-            => builder.AddNegotiate(authenticationScheme, displayName: null, configureOptions: configureOptions);
-
-        /// <summary>
-        /// Adds and configures Negotiate authentication.
-        /// </summary>
-        /// <typeparam name="TService">TService: A service resolved from the IServiceProvider for use when configuring this authentication provider. If you need multiple services then specify IServiceProvider and resolve them directly.</typeparam>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <param name="authenticationScheme">The scheme name used to identify the authentication handler internally.</param>
-        /// <param name="configureOptions">Allows for configuring the authentication handler.</param>
-        /// <returns>The original builder.</returns>
-        public static AuthenticationBuilder AddNegotiate<TService>(this AuthenticationBuilder builder, string authenticationScheme, Action<NegotiateOptions, TService> configureOptions) where TService : class
-            => builder.AddNegotiate(authenticationScheme, displayName: null, configureOptions: configureOptions);
-
-        /// <summary>
-        /// Adds and configures Negotiate authentication.
-        /// </summary>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <param name="authenticationScheme">The scheme name used to identify the authentication handler internally.</param>
-        /// <param name="displayName">The name displayed to users when selecting an authentication handler. The default is null to prevent this from displaying.</param>
-        /// <param name="configureOptions">Allows for configuring the authentication handler.</param>
-        /// <returns>The original builder.</returns>
-        public static AuthenticationBuilder AddNegotiate(this AuthenticationBuilder builder, string authenticationScheme, string displayName, Action<NegotiateOptions> configureOptions)
-        {
-            Action<NegotiateOptions, IServiceProvider> configureOptionsWithServices;
-            if (configureOptions == null)
-            {
-                configureOptionsWithServices = null;
-            }
-            else
-            {
-                configureOptionsWithServices = (options, _) => configureOptions(options);
-            }
-
-            return builder.AddNegotiate(authenticationScheme, displayName, configureOptionsWithServices);
-        }
-
-        /// <summary>
-        /// Adds and configures Negotiate authentication.
-        /// </summary>
-        /// <typeparam name="TService">TService: A service resolved from the IServiceProvider for use when configuring this authentication provider. If you need multiple services then specify IServiceProvider and resolve them directly.</typeparam>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <param name="authenticationScheme">The scheme name used to identify the authentication handler internally.</param>
-        /// <param name="displayName">The name displayed to users when selecting an authentication handler. The default is null to prevent this from displaying.</param>
-        /// <param name="configureOptions">Allows for configuring the authentication handler.</param>
-        /// <returns>The original builder.</returns>
-        public static AuthenticationBuilder AddNegotiate<TService>(this AuthenticationBuilder builder, string authenticationScheme, string displayName, Action<NegotiateOptions, TService> configureOptions) where TService : class
-        {
-            builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton<IPostConfigureOptions<NegotiateOptions>, PostConfigureNegotiateOptions>());
-            return builder.AddScheme<NegotiateOptions, NegotiateHandler, TService>(authenticationScheme, displayName, configureOptions);
-        }
+        builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton<IPostConfigureOptions<NegotiateOptions>, PostConfigureNegotiateOptions>());
+        builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton<IStartupFilter>(new NegotiateOptionsValidationStartupFilter(authenticationScheme)));
+        return builder.AddScheme<NegotiateOptions, NegotiateHandler>(authenticationScheme, displayName, configureOptions);
     }
 }

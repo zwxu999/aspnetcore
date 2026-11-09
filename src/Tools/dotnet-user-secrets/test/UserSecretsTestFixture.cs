@@ -1,41 +1,42 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 
-namespace Microsoft.Extensions.Configuration.UserSecrets.Tests
+namespace Microsoft.Extensions.Configuration.UserSecrets.Tests;
+
+public class UserSecretsTestFixture : IDisposable
 {
-    public class UserSecretsTestFixture : IDisposable
+    private Stack<Action> _disposables = new Stack<Action>();
+
+    public const string TestSecretsId = "b918174fa80346bbb7f4a386729c0eff";
+
+    public UserSecretsTestFixture()
     {
-        private Stack<Action> _disposables = new Stack<Action>();
+        _disposables.Push(() => TryDelete(Path.GetDirectoryName(PathHelper.GetSecretsPathFromSecretsId(TestSecretsId))));
+    }
 
-        public const string TestSecretsId = "b918174fa80346bbb7f4a386729c0eff";
-
-        public UserSecretsTestFixture()
+    public void Dispose()
+    {
+        while (_disposables.Count > 0)
         {
-            _disposables.Push(() => TryDelete(Path.GetDirectoryName(PathHelper.GetSecretsPathFromSecretsId(TestSecretsId))));
+            _disposables.Pop()?.Invoke();
         }
+    }
 
-        public void Dispose()
-        {
-            while (_disposables.Count > 0)
-            {
-                _disposables.Pop()?.Invoke();
-            }
-        }
+    public string GetTempSecretProject()
+    {
+        string userSecretsId;
+        return GetTempSecretProject(out userSecretsId);
+    }
 
-        public string GetTempSecretProject()
-        {
-            string userSecretsId;
-            return GetTempSecretProject(out userSecretsId);
-        }
-
-        private const string ProjectTemplate = @"<Project ToolsVersion=""15.0"" Sdk=""Microsoft.NET.Sdk"">
+    private const string ProjectTemplate = @"<Project ToolsVersion=""15.0"" Sdk=""Microsoft.NET.Sdk"">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFrameworks>net5.0</TargetFrameworks>
+    <TargetFramework>net12.0</TargetFramework>
     {0}
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
@@ -45,53 +46,76 @@ namespace Microsoft.Extensions.Configuration.UserSecrets.Tests
   </ItemGroup>
 </Project>";
 
-        public string GetTempSecretProject(out string userSecretsId)
-        {
-            userSecretsId = Guid.NewGuid().ToString();
-            return CreateProject(userSecretsId);
-        }
+    public string GetTempSecretProject(out string userSecretsId)
+    {
+        userSecretsId = Guid.NewGuid().ToString();
+        return CreateProject(userSecretsId);
+    }
 
-        public string CreateProject(string userSecretsId)
-        {
-            var projectPath = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "usersecretstest", Guid.NewGuid().ToString()));
-            var prop = string.IsNullOrEmpty(userSecretsId)
-                ? string.Empty
-                : $"<UserSecretsId>{userSecretsId}</UserSecretsId>";
+    public string GetTempFileBasedApp(out string userSecretsId)
+    {
+        userSecretsId = Guid.NewGuid().ToString();
+        return CreateFileBasedApp(userSecretsId);
+    }
 
-            File.WriteAllText(
-                Path.Combine(projectPath.FullName, "TestProject.csproj"),
-                string.Format(ProjectTemplate, prop));
+    public string CreateProject(string userSecretsId)
+    {
+        var projectPath = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "usersecretstest", Guid.NewGuid().ToString()));
+        var prop = string.IsNullOrEmpty(userSecretsId)
+            ? string.Empty
+            : $"<UserSecretsId>{userSecretsId}</UserSecretsId>";
 
-            var id = userSecretsId;
-            _disposables.Push(() =>
-            {
-                try
-                {
-                    // may throw if id is bad
-                    var secretsDir = Path.GetDirectoryName(PathHelper.GetSecretsPathFromSecretsId(id));
-                    TryDelete(secretsDir);
-                }
-                catch { }
-            });
-            _disposables.Push(() => TryDelete(projectPath.FullName));
+        File.WriteAllText(
+            Path.Combine(projectPath.FullName, "TestProject.csproj"),
+            string.Format(CultureInfo.InvariantCulture, ProjectTemplate, prop));
 
-            return projectPath.FullName;
-        }
+        AddToDisposables(userSecretsId, projectPath);
 
-        private static void TryDelete(string directory)
+        return projectPath.FullName;
+    }
+
+    public string CreateFileBasedApp(string userSecretsId)
+    {
+        var directory = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "usersecretstest", Guid.NewGuid().ToString()));
+
+        File.WriteAllText(Path.Join(directory.FullName, "app.cs"), $"""
+            #:property UserSecretsId={userSecretsId}
+            Console.WriteLine();
+            """);
+
+        AddToDisposables(userSecretsId, directory);
+
+        return directory.FullName;
+    }
+
+    private void AddToDisposables(string userSecretsId, DirectoryInfo dir)
+    {
+        _disposables.Push(() =>
         {
             try
             {
-                if (Directory.Exists(directory))
-                {
-                    Directory.Delete(directory, true);
-                }
+                // may throw if id is bad
+                var secretsDir = Path.GetDirectoryName(PathHelper.GetSecretsPathFromSecretsId(userSecretsId));
+                TryDelete(secretsDir);
             }
-            catch (Exception)
+            catch { }
+        });
+        _disposables.Push(() => TryDelete(dir.FullName));
+    }
+
+    private static void TryDelete(string directory)
+    {
+        try
+        {
+            if (Directory.Exists(directory))
             {
-                // Ignore failures.
-                Console.WriteLine("Failed to delete " + directory);
+                Directory.Delete(directory, true);
             }
+        }
+        catch (Exception)
+        {
+            // Ignore failures.
+            Console.WriteLine("Failed to delete " + directory);
         }
     }
 }

@@ -1,26 +1,28 @@
-﻿using System.IO;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.Logging;
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-namespace CookiePolicySample
+namespace CookiePolicySample;
+
+public static class Program
 {
-    public static class Program
+    public static Task Main(string[] args)
     {
-        public static void Main(string[] args)
-        {
-            var host = new WebHostBuilder()
-                .ConfigureLogging(factory =>
-                {
-                    factory.AddConsole();
-                    factory.AddFilter("Microsoft", LogLevel.Trace);
-                })
-                .UseKestrel()
-                .UseContentRoot(Directory.GetCurrentDirectory())
-                .UseIISIntegration()
-                .UseStartup<Startup>()
-                .Build();
+        var host = new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
+            {
+                webHostBuilder
+                    .UseKestrel()
+                    .UseContentRoot(Directory.GetCurrentDirectory())
+                    .UseIISIntegration()
+                    .UseStartup<Startup>();
+            })
+            .ConfigureLogging(factory =>
+            {
+                factory.AddConsole();
+                factory.AddFilter("Microsoft", LogLevel.Trace);
+            })
+            .Build();
 
-            host.Run();
-        }
+        return host.RunAsync();
     }
 }

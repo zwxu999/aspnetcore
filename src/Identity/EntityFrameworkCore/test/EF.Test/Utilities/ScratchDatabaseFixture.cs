@@ -1,41 +1,47 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Data.Common;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
-namespace Microsoft.AspNetCore.Identity.EntityFrameworkCore.Test
+namespace Microsoft.AspNetCore.Identity.EntityFrameworkCore.Test;
+
+public class ScratchDatabaseFixture : IDisposable
 {
-    public class ScratchDatabaseFixture : IDisposable
+    private readonly SqliteConnection _connection;
+
+    public ScratchDatabaseFixture()
     {
-        private readonly SqliteConnection _connection;
+        _connection = new SqliteConnection($"DataSource=D{Guid.NewGuid()}.db");
 
-        public ScratchDatabaseFixture()
+        using (var context = CreateEmptyContext())
         {
-            _connection = new SqliteConnection($"DataSource=D{Guid.NewGuid()}.db");
+            context.Database.EnsureDeleted();
+            context.Database.EnsureCreated();
+        }
+    }
 
-            using (var context = CreateEmptyContext())
-            {
-                context.Database.EnsureDeleted();
-                context.Database.EnsureCreated();
-            }
+    private DbContext CreateEmptyContext()
+    {
+        var services = new ServiceCollection();
+        services.Configure<IdentityOptions>(options => options.Stores.SchemaVersion = IdentitySchemaVersions.Version3);
+        return new DbContext(new DbContextOptionsBuilder()
+            .UseSqlite(_connection)
+            .UseApplicationServiceProvider(services.BuildServiceProvider())
+            .Options);
+    }
+
+    public DbConnection Connection => _connection;
+
+    public void Dispose()
+    {
+        using (var context = CreateEmptyContext())
+        {
+            context.Database.EnsureDeleted();
         }
 
-        private DbContext CreateEmptyContext()
-            => new DbContext(new DbContextOptionsBuilder().UseSqlite(_connection).Options);
-
-        public DbConnection Connection => _connection;
-
-        public void Dispose()
-        {
-            using (var context = CreateEmptyContext())
-            {
-                context.Database.EnsureDeleted();
-            }
-
-            _connection.Dispose();
-        }
+        _connection.Dispose();
     }
 }

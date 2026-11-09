@@ -1,109 +1,99 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication;
 
 using Microsoft.AspNetCore.Authentication.Certificate;
 
-namespace Microsoft.Extensions.DependencyInjection
+namespace Microsoft.Extensions.DependencyInjection;
+
+/// <summary>
+/// Extension methods to add Certificate authentication capabilities to an HTTP application pipeline.
+/// </summary>
+public static class CertificateAuthenticationAppBuilderExtensions
 {
     /// <summary>
-    /// Extension methods to add Certificate authentication capabilities to an HTTP application pipeline.
+    /// Adds certificate authentication.
+    /// <para>
+    /// Certificate authentication uses a authentication handler that validates client certificate and
+    /// raises an event where the certificate is resolved to a <see cref="ClaimsPrincipal"/>.
+    /// See <see href="https://tools.ietf.org/html/rfc5246#section-7.4.4"/> to read more about certificate authentication.
+    /// </para>
     /// </summary>
-    public static class CertificateAuthenticationAppBuilderExtensions
+    /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
+    /// <returns>The <see cref="AuthenticationBuilder"/>.</returns>
+    public static AuthenticationBuilder AddCertificate(this AuthenticationBuilder builder)
+        => builder.AddCertificate(CertificateAuthenticationDefaults.AuthenticationScheme);
+
+    /// <summary>
+    /// Adds certificate authentication.
+    /// <para>
+    /// Certificate authentication uses a authentication handler that validates client certificate and
+    /// raises an event where the certificate is resolved to a <see cref="ClaimsPrincipal"/>.
+    /// See <see href="https://tools.ietf.org/html/rfc5246#section-7.4.4"/> to read more about certificate authentication.
+    /// </para>
+    /// </summary>
+    /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
+    /// <param name="authenticationScheme">The authentication scheme.</param>
+    /// <returns>The <see cref="AuthenticationBuilder"/>.</returns>
+    public static AuthenticationBuilder AddCertificate(this AuthenticationBuilder builder, string authenticationScheme)
+        => builder.AddCertificate(authenticationScheme, configureOptions: null);
+
+    /// <summary>
+    /// Adds certificate authentication.
+    /// <para>
+    /// Certificate authentication uses a authentication handler that validates client certificate and
+    /// raises an event where the certificate is resolved to a <see cref="ClaimsPrincipal"/>.
+    /// See <see href="https://tools.ietf.org/html/rfc5246#section-7.4.4"/> to read more about certificate authentication.
+    /// </para>
+    /// </summary>
+    /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
+    /// <param name="configureOptions">A delegate to configure <see cref="CertificateAuthenticationOptions"/>.</param>
+    /// <returns>The <see cref="AuthenticationBuilder"/>.</returns>
+    public static AuthenticationBuilder AddCertificate(this AuthenticationBuilder builder, Action<CertificateAuthenticationOptions>? configureOptions)
+        => builder.AddCertificate(CertificateAuthenticationDefaults.AuthenticationScheme, configureOptions);
+
+    /// <summary>
+    /// Adds certificate authentication.
+    /// <para>
+    /// Certificate authentication uses a authentication handler that validates client certificate and
+    /// raises an event where the certificate is resolved to a <see cref="ClaimsPrincipal"/>.
+    /// See <see href="https://tools.ietf.org/html/rfc5246#section-7.4.4"/> to read more about certificate authentication.
+    /// </para>
+    /// </summary>
+    /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
+    /// <param name="authenticationScheme">The authentication scheme.</param>
+    /// <param name="configureOptions">A delegate to configure <see cref="CertificateAuthenticationOptions"/>.</param>
+    /// <returns>The <see cref="AuthenticationBuilder"/>.</returns>
+    public static AuthenticationBuilder AddCertificate(
+        this AuthenticationBuilder builder,
+        string authenticationScheme,
+        Action<CertificateAuthenticationOptions>? configureOptions)
+        => builder.AddScheme<CertificateAuthenticationOptions, CertificateAuthenticationHandler>(authenticationScheme, configureOptions);
+
+    /// <summary>
+    /// Adds certificate authentication.
+    /// <para>
+    /// Certificate authentication uses a authentication handler that validates client certificate and
+    /// raises an event where the certificate is resolved to a <see cref="ClaimsPrincipal"/>.
+    /// See <see href="https://tools.ietf.org/html/rfc5246#section-7.4.4"/> to read more about certificate authentication.
+    /// </para>
+    /// </summary>
+    /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
+    /// <param name="configureOptions">A delegate to configure <see cref="CertificateValidationCacheOptions"/>.</param>
+    /// <returns>The <see cref="AuthenticationBuilder"/>.</returns>
+    public static AuthenticationBuilder AddCertificateCache(
+        this AuthenticationBuilder builder,
+        Action<CertificateValidationCacheOptions>? configureOptions = null)
     {
-        /// <summary>
-        /// Adds certificate authentication.
-        /// </summary>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <returns>The <see cref="AuthenticationBuilder"/>.</returns>
-        public static AuthenticationBuilder AddCertificate(this AuthenticationBuilder builder)
-            => builder.AddCertificate(CertificateAuthenticationDefaults.AuthenticationScheme);
-
-        /// <summary>
-        /// Adds certificate authentication.
-        /// </summary>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <param name="authenticationScheme"></param>
-        /// <returns>The <see cref="AuthenticationBuilder"/>.</returns>
-        public static AuthenticationBuilder AddCertificate(this AuthenticationBuilder builder, string authenticationScheme)
-            => builder.AddCertificate(authenticationScheme, configureOptions: (Action<CertificateAuthenticationOptions, IServiceProvider>)null);
-
-        /// <summary>
-        /// Adds certificate authentication.
-        /// </summary>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <param name="configureOptions"></param>
-        /// <returns>The <see cref="AuthenticationBuilder"/>.</returns>
-        public static AuthenticationBuilder AddCertificate(this AuthenticationBuilder builder, Action<CertificateAuthenticationOptions> configureOptions)
-            => builder.AddCertificate(CertificateAuthenticationDefaults.AuthenticationScheme, configureOptions);
-
-        /// <summary>
-        /// Adds certificate authentication.
-        /// </summary>
-        /// <typeparam name="TService">TService: A service resolved from the IServiceProvider for use when configuring this authentication provider. If you need multiple services then specify IServiceProvider and resolve them directly.</typeparam>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <param name="configureOptions"></param>
-        /// <returns>The <see cref="AuthenticationBuilder"/>.</returns>
-        public static AuthenticationBuilder AddCertificate<TService>(this AuthenticationBuilder builder, Action<CertificateAuthenticationOptions, TService> configureOptions) where TService : class
-            => builder.AddCertificate(CertificateAuthenticationDefaults.AuthenticationScheme, configureOptions);
-
-        /// <summary>
-        /// Adds certificate authentication.
-        /// </summary>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <param name="authenticationScheme"></param>
-        /// <param name="configureOptions"></param>
-        /// <returns>The <see cref="AuthenticationBuilder"/>.</returns>
-        public static AuthenticationBuilder AddCertificate(
-            this AuthenticationBuilder builder,
-            string authenticationScheme,
-            Action<CertificateAuthenticationOptions> configureOptions)
+        // Registered as an app-wide singleton shared across certificate authentication schemes: safe because
+        // CertificateValidationCache.ComputeKey namespaces every cache entry by scheme name.
+        builder.Services.AddSingleton<ICertificateValidationCache, CertificateValidationCache>();
+        if (configureOptions != null)
         {
-            Action<CertificateAuthenticationOptions, IServiceProvider> configureOptionsWithServices;
-            if (configureOptions == null)
-            {
-                configureOptionsWithServices = null;
-            }
-            else
-            {
-                configureOptionsWithServices = (options, _) => configureOptions(options);
-            }
-
-            return builder.AddCertificate(authenticationScheme, configureOptionsWithServices);
+            builder.Services.Configure(configureOptions);
         }
-
-        /// <summary>
-        /// Adds certificate authentication.
-        /// </summary>
-        /// <typeparam name="TService">TService: A service resolved from the IServiceProvider for use when configuring this authentication provider. If you need multiple services then specify IServiceProvider and resolve them directly.</typeparam>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <param name="authenticationScheme"></param>
-        /// <param name="configureOptions"></param>
-        /// <returns>The <see cref="AuthenticationBuilder"/>.</returns>
-        public static AuthenticationBuilder AddCertificate<TService>(
-            this AuthenticationBuilder builder,
-            string authenticationScheme,
-            Action<CertificateAuthenticationOptions, TService> configureOptions) where TService : class
-            => builder.AddScheme<CertificateAuthenticationOptions, CertificateAuthenticationHandler, TService>(authenticationScheme, configureOptions);
-
-        /// <summary>
-        /// Adds certificate authentication.
-        /// </summary>
-        /// <param name="builder">The <see cref="AuthenticationBuilder"/>.</param>
-        /// <param name="configureOptions"></param>
-        /// <returns>The <see cref="AuthenticationBuilder"/>.</returns>
-        public static AuthenticationBuilder AddCertificateCache(
-            this AuthenticationBuilder builder,
-            Action<CertificateValidationCacheOptions> configureOptions = null)
-        {
-            builder.Services.AddSingleton<ICertificateValidationCache, CertificateValidationCache>();
-            if (configureOptions != null)
-            {
-                builder.Services.Configure(configureOptions);
-            }
-            return builder;
-        }
+        return builder;
     }
 }

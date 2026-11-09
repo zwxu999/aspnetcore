@@ -1,7 +1,7 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-import { CompletionMessage, InvocationMessage, MessageType, NullLogger, StreamItemMessage } from "@microsoft/signalr";
+import { AckMessage, CloseMessage, CompletionMessage, InvocationMessage, MessageType, NullLogger, SequenceMessage, StreamItemMessage } from "@microsoft/signalr";
 import { MessagePackHubProtocol } from "../src/MessagePackHubProtocol";
 
 describe("MessagePackHubProtocol", () => {
@@ -99,7 +99,7 @@ describe("MessagePackHubProtocol", () => {
             invocationId: "abc",
             type: MessageType.Completion,
         } as CompletionMessage],
-    ] as Array<[number[], CompletionMessage]>).forEach(([payload, expectedMessage]) =>
+    ] as [number[], CompletionMessage][]).forEach(([payload, expectedMessage]) =>
         it("can read Completion message", () => {
             const messages = new MessagePackHubProtocol().parseMessages(new Uint8Array(payload).buffer, NullLogger.instance);
             expect(messages).toEqual([expectedMessage]);
@@ -120,7 +120,7 @@ describe("MessagePackHubProtocol", () => {
             item: new Date(Date.UTC(2018, 0, 1, 11, 24, 0)),
             type: MessageType.StreamItem,
         } as StreamItemMessage],
-    ] as Array<[number[], StreamItemMessage]>).forEach(([payload, expectedMessage]) =>
+    ] as [number[], StreamItemMessage][]).forEach(([payload, expectedMessage]) =>
         it("can read StreamItem message", () => {
             const messages = new MessagePackHubProtocol().parseMessages(new Uint8Array(payload).buffer, NullLogger.instance);
             expect(messages).toEqual([expectedMessage]);
@@ -136,7 +136,7 @@ describe("MessagePackHubProtocol", () => {
             item: 8,
             type: MessageType.StreamItem,
         } as StreamItemMessage],
-    ] as Array<[number[], StreamItemMessage]>).forEach(([payload, expectedMessage]) =>
+    ] as [number[], StreamItemMessage][]).forEach(([payload, expectedMessage]) =>
         it("can read message with headers", () => {
             const messages = new MessagePackHubProtocol().parseMessages(new Uint8Array(payload).buffer, NullLogger.instance);
             expect(messages).toEqual([expectedMessage]);
@@ -152,7 +152,7 @@ describe("MessagePackHubProtocol", () => {
         ["Completion message with invalid invocation id", [0x04, 0x93, 0x03, 0x80, 0xa0], "Invalid payload for Completion message."],
         ["Completion message with missing result", [0x05, 0x94, 0x03, 0x80, 0xa0, 0x01], "Invalid payload for Completion message."],
         ["Completion message with missing error", [0x05, 0x94, 0x03, 0x80, 0xa0, 0x03], "Invalid payload for Completion message."],
-    ] as Array<[string, number[], string]>).forEach(([name, payload, expectedError]) =>
+    ] as [string, number[], string][]).forEach(([name, payload, expectedError]) =>
         it("throws for " + name, () => {
             expect(() => new MessagePackHubProtocol().parseMessages(new Uint8Array(payload).buffer, NullLogger.instance))
                 .toThrow(expectedError);
@@ -218,7 +218,41 @@ describe("MessagePackHubProtocol", () => {
         expect(new Uint8Array(buffer)).toEqual(payload);
     });
 
-    it("will preserve double precision if forceFloat64 is set", () => {
+    it("can write completion message with false result", () => {
+        const payload = new Uint8Array([
+            0x09, // length prefix
+            0x95, // message array length = 5 (fixarray)
+            0x03, // type = 3 = Completion
+            0x80, // headers
+            0xa3, // invocationID = string length 3
+            0x61, // a
+            0x62, // b
+            0x63, // c
+            0x03, // result type, 3 - non-void result
+            0xc2, // false
+        ]);
+        const buffer = new MessagePackHubProtocol().writeMessage({ type: MessageType.Completion, invocationId: "abc", result: false });
+        expect(new Uint8Array(buffer)).toEqual(payload);
+    });
+
+    it("can write completion message with null result", () => {
+        const payload = new Uint8Array([
+            0x09, // length prefix
+            0x95, // message array length = 5 (fixarray)
+            0x03, // type = 3 = Completion
+            0x80, // headers
+            0xa3, // invocationID = string length 3
+            0x61, // a
+            0x62, // b
+            0x63, // c
+            0x03, // result type, 3 - non-void result
+            0xc0, // null
+        ]);
+        const buffer = new MessagePackHubProtocol().writeMessage({ type: MessageType.Completion, invocationId: "abc", result: null });
+        expect(new Uint8Array(buffer)).toEqual(payload);
+    });
+
+    it("will preserve double precision", () => {
         const invocation = {
             arguments: [Number(0.005)],
             headers: {},
@@ -228,7 +262,7 @@ describe("MessagePackHubProtocol", () => {
             type: MessageType.Invocation,
         } as InvocationMessage;
 
-        const protocol = new MessagePackHubProtocol({ forceFloat64: true });
+        const protocol = new MessagePackHubProtocol({ });
         const parsedMessages = protocol.parseMessages(protocol.writeMessage(invocation), NullLogger.instance);
         expect(parsedMessages[0]).toEqual({
             arguments: [0.005],
@@ -240,9 +274,45 @@ describe("MessagePackHubProtocol", () => {
         });
     });
 
-    it("will force compatibilityMode to false", () => {
-        const options: any = { compatibilityMode: true };
-        const protocol: any = new MessagePackHubProtocol(options);
-        expect(protocol.messagePackOptions.compatibilityMode).toBe(false);
+    it("can write/read Close message", () => {
+        const closeMessage = {
+            type: MessageType.Close,
+        } as CloseMessage;
+
+        const protocol = new MessagePackHubProtocol();
+        const parsedMessages = protocol.parseMessages(protocol.writeMessage(closeMessage), NullLogger.instance);
+        expect(parsedMessages.length).toEqual(1);
+        expect(parsedMessages[0].type).toEqual(MessageType.Close);
+    });
+
+    it("can write/read Ack message", () => {
+        const ackMessage = {
+            sequenceId: 13,
+            type: MessageType.Ack,
+        } as AckMessage;
+
+        const protocol = new MessagePackHubProtocol();
+        const parsedMessages = protocol.parseMessages(protocol.writeMessage(ackMessage), NullLogger.instance);
+        expect(parsedMessages.length).toEqual(1);
+        expect(parsedMessages[0].type).toEqual(MessageType.Ack);
+        expect(parsedMessages[0]).toEqual({
+            sequenceId: 13,
+            type: MessageType.Ack
+        });
+    });
+
+    it("can write/read Sequence message", () => {
+        const sequenceMessage = {
+            sequenceId: 24,
+            type: MessageType.Sequence,
+        } as SequenceMessage;
+
+        const protocol = new MessagePackHubProtocol();
+        const parsedMessages = protocol.parseMessages(protocol.writeMessage(sequenceMessage), NullLogger.instance);
+        expect(parsedMessages.length).toEqual(1);
+        expect(parsedMessages[0]).toEqual({
+            sequenceId: 24,
+            type: MessageType.Sequence
+        });
     });
 });

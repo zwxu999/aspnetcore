@@ -1,34 +1,30 @@
-﻿{
-  "iisSettings": {
-    //#if (WindowsAuth) 
-    "windowsAuthentication": true, 
-    "anonymousAuthentication": false, 
-    //#else 
-    "windowsAuthentication": false, 
-    "anonymousAuthentication": true, 
-    //#endif
-    "iisExpress": {
-      "applicationUrl": "http://localhost:8080",
-      //#if(NoHttps)
-      "sslPort": 0
-      //#else
-      "sslPort": 44300
-      //#endif
-    }
-  },
+{
+  "$schema": "https://json.schemastore.org/launchsettings.json",
   "profiles": {
-    "IIS Express": {
-      "commandName": "IISExpress",
+    "http": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
       "launchBrowser": true,
+      //#if (LocalhostTld)
+      "applicationUrl": "http://LocalhostTldHostNamePrefix.dev.localhost:5000",
+      //#else
+      "applicationUrl": "http://localhost:5000",
+      //#endif
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development"
       }
+      //#if (HasHttpsProfile)
     },
-    "Company.WebApplication1": {
+    //#else
+    }
+    //#endif
+    //#if (HasHttpsProfile)
+    "https": {
       "commandName": "Project",
+      "dotnetRunMessages": true,
       "launchBrowser": true,
-      //#if(NoHttps)
-      "applicationUrl": "http://localhost:5000",
+      //#if (LocalhostTld)
+      "applicationUrl": "https://LocalhostTldHostNamePrefix.dev.localhost:5001;http://LocalhostTldHostNamePrefix.dev.localhost:5000",
       //#else
       "applicationUrl": "https://localhost:5001;http://localhost:5000",
       //#endif
@@ -36,5 +32,6 @@
         "ASPNETCORE_ENVIRONMENT": "Development"
       }
     }
+    //#endif
   }
 }

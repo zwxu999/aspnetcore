@@ -1,25 +1,26 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 module.exports = {
-    globals: {
-        "ts-jest": {
-            "tsConfig": "./tsconfig.jest.json",
-            "babelConfig": true,
-            "diagnostics": true
-        }
-    },
     reporters: [
         "default",
-        ["./common/node_modules/jest-junit/index.js", { "output": "../../../../artifacts/log/" + `${process.platform}` + ".signalr.junit.xml" }]
+        ["jest-junit", { "outputDirectory": "../../../../artifacts/log/", "outputName": `${process.platform}` + ".signalr.junit.xml" }]
     ],
     transform: {
-        "^.+\\.tsx?$": "./common/node_modules/ts-jest"
+        "^.+\\.tsx?$": [
+            "ts-jest",
+            {
+                "tsconfig": "./tsconfig.jest.json",
+                "babelConfig": true,
+                "diagnostics": true
+            }
+        ]
     },
     testEnvironment: "node",
     testRegex: "(/__tests__/.*|(\\.|/)(test|spec))\\.(jsx?|tsx?)$",
+    testRunner: "jest-jasmine2",
     moduleNameMapper: {
-        "^ts-jest$": "<rootDir>/common/node_modules/ts-jest",
+        "^ts-jest$": "ts-jest",
         "^@microsoft/signalr$": "<rootDir>/signalr/dist/cjs/index.js"
     },
     moduleFileExtensions: [

@@ -1,48 +1,72 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Globalization;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.Extensions.DependencyInjection;
 
-namespace Microsoft.AspNetCore.Builder
+namespace Microsoft.AspNetCore.Builder;
+
+/// <summary>
+/// Options for <see cref="StatusCodePagesMiddleware"/>.
+/// </summary>
+public class StatusCodePagesOptions
 {
     /// <summary>
-    /// Options for StatusCodePagesMiddleware.
+    /// Creates a default <see cref="StatusCodePagesOptions"/> whose handler attempts to generate a
+    /// <see cref="Microsoft.AspNetCore.Mvc.ProblemDetails"/> response using <see cref="IProblemDetailsService"/>, and falls back
+    /// to a plaintext response containing the status code and reason phrase when that service is unavailable
+    /// or cannot write a response.
     /// </summary>
-    public class StatusCodePagesOptions
+    public StatusCodePagesOptions()
     {
-        public StatusCodePagesOptions()
+        HandleAsync = async context =>
         {
-            HandleAsync = context =>
-            {
-                // TODO: Render with a pre-compiled html razor view.
-                var statusCode = context.HttpContext.Response.StatusCode;
+            var statusCode = context.HttpContext.Response.StatusCode;
+            var problemDetailsService = context.HttpContext.RequestServices.GetService<IProblemDetailsService>();
 
+            if (problemDetailsService == null ||
+                !await problemDetailsService.TryWriteAsync(new() { HttpContext = context.HttpContext, ProblemDetails = { Status = statusCode } }))
+            {
+                // TODO: Render with a pre-compiled html razor view
                 var body = BuildResponseBody(statusCode);
 
                 context.HttpContext.Response.ContentType = "text/plain";
-                return context.HttpContext.Response.WriteAsync(body);
-            };
-        }
-
-        private string BuildResponseBody(int httpStatusCode)
-        {
-            // Note the 500 spaces are to work around an IE 'feature'
-            var internetExplorerWorkaround = new string(' ', 500);
-
-            var reasonPhrase = ReasonPhrases.GetReasonPhrase(httpStatusCode);
-
-            return string.Format(CultureInfo.InvariantCulture, "Status Code: {0}{1}{2}{3}",
-                                                                    httpStatusCode,
-                                                                    string.IsNullOrWhiteSpace(reasonPhrase) ? "" : "; ",
-                                                                    reasonPhrase,
-                                                                    internetExplorerWorkaround);
-        }
-
-        public Func<StatusCodeContext, Task> HandleAsync { get; set; }
+                await context.HttpContext.Response.WriteAsync(body);
+            }
+        };
     }
+
+    private static string BuildResponseBody(int httpStatusCode)
+    {
+        // Note the 500 spaces are to work around an IE 'feature'
+        var internetExplorerWorkaround = new string(' ', 500);
+
+        var reasonPhrase = ReasonPhrases.GetReasonPhrase(httpStatusCode);
+
+        return string.Format(CultureInfo.InvariantCulture, "Status Code: {0}{1}{2}{3}",
+                                                                httpStatusCode,
+                                                                string.IsNullOrWhiteSpace(reasonPhrase) ? "" : "; ",
+                                                                reasonPhrase,
+                                                                internetExplorerWorkaround);
+    }
+
+    /// <summary>
+    /// The handler that generates the response body for the given <see cref="StatusCodeContext"/>.
+    /// By default this attempts to generate a <see cref="Microsoft.AspNetCore.Mvc.ProblemDetails"/> response
+    /// using <see cref="IProblemDetailsService"/> and falls back to a plain text response that includes the
+    /// status code.
+    /// </summary>
+    public Func<StatusCodeContext, Task> HandleAsync { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether the handler needs to create a separate <see cref="IServiceProvider"/> scope and
+    /// replace it on <see cref="HttpContext.RequestServices"/> when re-executing the request.
+    /// </summary>
+    /// <remarks>The default value is <see langword="false"/>.</remarks>
+    public bool CreateScopeForStatusCodePages { get; set; }
+
+    internal string? PathFormat { get; set; }
 }

@@ -1,18 +1,20 @@
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using Microsoft.AspNetCore;
-using Microsoft.AspNetCore.Hosting;
+namespace OpenIdConnectSample;
 
-namespace OpenIdConnectSample
+public static class Program
 {
-    public static class Program
+    public static Task Main(string[] args)
     {
-        public static void Main(string[] args)
-        {
-            var host = WebHost.CreateDefaultBuilder(args)
-                .UseStartup<Startup>()
-                .Build();
+        var host = Host.CreateDefaultBuilder(args)
+            .ConfigureWebHostDefaults(webHostBuilder =>
+            {
+                webHostBuilder
+                    .UseStartup<Startup>();
+            })
+            .Build();
 
-            host.Run();
-        }
+        return host.RunAsync();
     }
 }

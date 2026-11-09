@@ -1,94 +1,108 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Runtime.ExceptionServices;
-using System.Threading;
-using System.Threading.Tasks;
 using OpenQA.Selenium;
-using Xunit;
 using Xunit.Abstractions;
 
-namespace Microsoft.AspNetCore.E2ETesting
+namespace Microsoft.AspNetCore.E2ETesting;
+
+[CaptureSeleniumLogs]
+public class BrowserTestBase : IClassFixture<BrowserFixture>, IAsyncLifetime
 {
-    [CaptureSeleniumLogs]
-    public class BrowserTestBase : IClassFixture<BrowserFixture>, IAsyncLifetime
+    private static readonly AsyncLocal<IWebDriver> _asyncBrowser = new AsyncLocal<IWebDriver>();
+    private static readonly AsyncLocal<ILogs> _logs = new AsyncLocal<ILogs>();
+    private static readonly AsyncLocal<ITestOutputHelper> _output = new AsyncLocal<ITestOutputHelper>();
+
+    private ExceptionDispatchInfo _exceptionDispatchInfo;
+    private IWebDriver _browser;
+    private System.Drawing.Size? _originalWindowSize;
+
+    public BrowserTestBase(BrowserFixture browserFixture, ITestOutputHelper output)
     {
-        private static readonly AsyncLocal<IWebDriver> _asyncBrowser = new AsyncLocal<IWebDriver>();
-        private static readonly AsyncLocal<ILogs> _logs = new AsyncLocal<ILogs>();
-        private static readonly AsyncLocal<ITestOutputHelper> _output = new AsyncLocal<ITestOutputHelper>();
+        BrowserFixture = browserFixture;
+        _output.Value = output;
+    }
 
-        private ExceptionDispatchInfo _exceptionDispatchInfo;
-        private IWebDriver _browser;
-
-        public BrowserTestBase(BrowserFixture browserFixture, ITestOutputHelper output)
+    public IWebDriver Browser
+    {
+        get
         {
-            BrowserFixture = browserFixture;
-            _output.Value = output;
-        }
-
-        public IWebDriver Browser
-        {
-            get
+            if (_exceptionDispatchInfo != null)
             {
-                if (_exceptionDispatchInfo != null)
-                {
-                    _exceptionDispatchInfo.Throw();
-                    throw _exceptionDispatchInfo.SourceException;
-                }
-
-                return _browser;
+                _exceptionDispatchInfo.Throw();
+                throw _exceptionDispatchInfo.SourceException;
             }
-            set
+
+            return _browser;
+        }
+        set
+        {
+            _browser = value;
+        }
+    }
+
+    public static IWebDriver BrowserAccessor => _asyncBrowser.Value;
+
+    public static ILogs Logs => _logs.Value;
+
+    public static ITestOutputHelper Output => _output.Value;
+
+    public BrowserFixture BrowserFixture { get; }
+
+    public virtual Task DisposeAsync()
+    {
+        try
+        {
+            if (_originalWindowSize.HasValue && _originalWindowSize.Value != Browser.Manage().Window.Size)
             {
-                _browser = value;
+                Browser.SetWindowSize(_originalWindowSize.Value.Width, _originalWindowSize.Value.Height);
             }
         }
-
-        public static IWebDriver BrowserAccessor => _asyncBrowser.Value;
-
-        public static ILogs Logs => _logs.Value;
-
-        public static ITestOutputHelper Output => _output.Value;
-
-        public BrowserFixture BrowserFixture { get; }
-
-        public Task DisposeAsync()
+        catch (WebDriverException)
         {
-            return Task.CompletedTask;
+            // An exception is thrown if the browser has been closed in the test.
+            // In that case we don't need to reset the window size.
         }
 
-        public virtual Task InitializeAsync()
-        {
-            return InitializeAsync("");
-        }
+        return Task.CompletedTask;
+    }
 
-        public virtual async Task InitializeAsync(string isolationContext)
-        {
-            await InitializeBrowser(isolationContext);
+    public virtual Task InitializeAsync()
+    {
+        return InitializeAsync("");
+    }
 
-            InitializeAsyncCore();
-        }
+    public virtual Task InitializeAsync(string isolationContext)
+    {
+        InitializeBrowser(isolationContext);
+        InitializeAsyncCore();
+        return Task.CompletedTask;
+    }
 
-        protected virtual void InitializeAsyncCore()
-        {
-        }
+    protected virtual void InitializeAsyncCore()
+    {
+    }
 
-        protected async Task InitializeBrowser(string isolationContext)
+    protected void InitializeBrowser(string isolationContext)
+    {
+        try
         {
-            try
+            var (browser, logs) = BrowserFixture.GetOrCreateBrowser(Output, isolationContext);
+            _asyncBrowser.Value = browser;
+            _logs.Value = logs;
+
+            if (!_originalWindowSize.HasValue)
             {
-                var (browser, logs) = await BrowserFixture.GetOrCreateBrowserAsync(Output, isolationContext);
-                _asyncBrowser.Value = browser;
-                _logs.Value = logs;
+                _originalWindowSize = browser.Manage().Window.Size;
+            }
 
-                Browser = browser;
-            }
-            catch (Exception ex)
-            {
-                _exceptionDispatchInfo = ExceptionDispatchInfo.Capture(ex);
-                throw;
-            }
+            Browser = browser;
+        }
+        catch (Exception ex)
+        {
+            _exceptionDispatchInfo = ExceptionDispatchInfo.Capture(ex);
+            throw;
         }
     }
 }

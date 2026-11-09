@@ -1,92 +1,123 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System.Collections.Generic;
-using System.Net;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Shared;
+using AspNetIPNetwork = Microsoft.AspNetCore.HttpOverrides.IPNetwork;
+using IPAddress = System.Net.IPAddress;
+using IPNetwork = System.Net.IPNetwork;
 
-namespace Microsoft.AspNetCore.Builder
+namespace Microsoft.AspNetCore.Builder;
+
+/// <summary>
+/// Options for <see cref="ForwardedHeadersMiddleware"/>
+/// </summary>
+public class ForwardedHeadersOptions
 {
-    public class ForwardedHeadersOptions
-    {
-        /// <summary>
-        /// Use this header instead of <see cref="ForwardedHeadersDefaults.XForwardedForHeaderName"/>
-        /// </summary>
-        /// <seealso cref="Microsoft.AspNetCore.HttpOverrides.ForwardedHeadersDefaults"/>
-        public string ForwardedForHeaderName { get; set; } = ForwardedHeadersDefaults.XForwardedForHeaderName;
+    // Backing dual list that keeps the obsolete and new types in sync.
+    // Once the obsolete IList<IPNetwork> property is removed this can be changed to a simple List<IPNetwork>.
+    private readonly DualIPNetworkList _knownNetworks = new();
 
-        /// <summary>
-        /// Use this header instead of <see cref="ForwardedHeadersDefaults.XForwardedHostHeaderName"/>
-        /// </summary>
-        /// <seealso cref="ForwardedHeadersDefaults"/>
-        public string ForwardedHostHeaderName { get; set; } = ForwardedHeadersDefaults.XForwardedHostHeaderName;
+    /// <summary>
+    /// Gets or sets the header used to retrieve the originating client IP. Defaults to the value specified by
+    /// <see cref="ForwardedHeadersDefaults.XForwardedForHeaderName"/>.
+    /// </summary>
+    public string ForwardedForHeaderName { get; set; } = ForwardedHeadersDefaults.XForwardedForHeaderName;
 
-        /// <summary>
-        /// Use this header instead of <see cref="ForwardedHeadersDefaults.XForwardedProtoHeaderName"/>
-        /// </summary>
-        /// <seealso cref="ForwardedHeadersDefaults"/>
-        public string ForwardedProtoHeaderName { get; set; } = ForwardedHeadersDefaults.XForwardedProtoHeaderName;
+    /// <summary>
+    /// Gets or sets the header used to retrieve the original value of the Host header field.
+    /// Defaults to the value specified by <see cref="ForwardedHeadersDefaults.XForwardedHostHeaderName"/>
+    /// </summary>
+    public string ForwardedHostHeaderName { get; set; } = ForwardedHeadersDefaults.XForwardedHostHeaderName;
 
-        /// <summary>
-        /// Use this header instead of <see cref="ForwardedHeadersDefaults.XOriginalForHeaderName"/>
-        /// </summary>
-        /// <seealso cref="ForwardedHeadersDefaults"/>
-        public string OriginalForHeaderName { get; set; } = ForwardedHeadersDefaults.XOriginalForHeaderName;
+    /// <summary>
+    /// Gets or sets the header used to retrieve the value for the originating scheme (HTTP/HTTPS).
+    /// Defaults to the value specified by <see cref="ForwardedHeadersDefaults.XForwardedProtoHeaderName"/>
+    /// </summary>
+    public string ForwardedProtoHeaderName { get; set; } = ForwardedHeadersDefaults.XForwardedProtoHeaderName;
 
-        /// <summary>
-        /// Use this header instead of <see cref="ForwardedHeadersDefaults.XOriginalHostHeaderName"/>
-        /// </summary>
-        /// <seealso cref="ForwardedHeadersDefaults"/>
-        public string OriginalHostHeaderName { get; set; } = ForwardedHeadersDefaults.XOriginalHostHeaderName;
+    /// <summary>
+    /// Gets or sets the header used to retrieve the value for the path base.
+    /// Defaults to the value specified by <see cref="ForwardedHeadersDefaults.XForwardedPrefixHeaderName"/>
+    /// </summary>
+    public string ForwardedPrefixHeaderName { get; set; } = ForwardedHeadersDefaults.XForwardedPrefixHeaderName;
 
-        /// <summary>
-        /// Use this header instead of <see cref="ForwardedHeadersDefaults.XOriginalProtoHeaderName"/>
-        /// </summary>
-        /// <seealso cref="ForwardedHeadersDefaults"/>
-        public string OriginalProtoHeaderName { get; set; } = ForwardedHeadersDefaults.XOriginalProtoHeaderName;
+    /// <summary>
+    /// Gets or sets the header used to store the original value of client IP before applying forwarded headers.
+    /// Defaults to the value specified by <see cref="ForwardedHeadersDefaults.XOriginalForHeaderName"/>
+    /// </summary>
+    /// <seealso cref="ForwardedHeadersDefaults"/>
+    public string OriginalForHeaderName { get; set; } = ForwardedHeadersDefaults.XOriginalForHeaderName;
 
-        /// <summary>
-        /// Identifies which forwarders should be processed.
-        /// </summary>
-        public ForwardedHeaders ForwardedHeaders { get; set; }
+    /// <summary>
+    /// Gets or sets the header used to store the original value of the Host header field before applying forwarded headers.
+    /// Defaults to the value specified by <see cref="ForwardedHeadersDefaults.XOriginalHostHeaderName"/>
+    /// </summary>
+    /// <seealso cref="ForwardedHeadersDefaults"/>
+    public string OriginalHostHeaderName { get; set; } = ForwardedHeadersDefaults.XOriginalHostHeaderName;
 
-        /// <summary>
-        /// Limits the number of entries in the headers that will be processed. The default value is 1.
-        /// Set to null to disable the limit, but this should only be done if
-        /// KnownProxies or KnownNetworks are configured.
-        /// </summary>
-        public int? ForwardLimit { get; set; } = 1;
+    /// <summary>
+    /// Gets or sets the header used to store the original scheme (HTTP/HTTPS) before applying forwarded headers.
+    /// Defaults to the value specified by <see cref="ForwardedHeadersDefaults.XOriginalProtoHeaderName"/>
+    /// </summary>
+    /// <seealso cref="ForwardedHeadersDefaults"/>
+    public string OriginalProtoHeaderName { get; set; } = ForwardedHeadersDefaults.XOriginalProtoHeaderName;
 
-        /// <summary>
-        /// Addresses of known proxies to accept forwarded headers from.
-        /// </summary>
-        public IList<IPAddress> KnownProxies { get; } = new List<IPAddress>() { IPAddress.IPv6Loopback };
+    /// <summary>
+    /// Gets or sets the header used to store the original path base before applying forwarded headers.
+    /// Defaults to the value specified by <see cref="ForwardedHeadersDefaults.XOriginalPrefixHeaderName"/>
+    /// </summary>
+    /// <seealso cref="ForwardedHeadersDefaults"/>
+    public string OriginalPrefixHeaderName { get; set; } = ForwardedHeadersDefaults.XOriginalPrefixHeaderName;
 
-        /// <summary>
-        /// Address ranges of known proxies to accept forwarded headers from.
-        /// </summary>
-        public IList<IPNetwork> KnownNetworks { get; } = new List<IPNetwork>() { new IPNetwork(IPAddress.Loopback, 8) };
+    /// <summary>
+    /// Identifies which forwarders should be processed.
+    /// </summary>
+    public ForwardedHeaders ForwardedHeaders { get; set; }
 
-        /// <summary>
-        /// The allowed values from x-forwarded-host. If the list is empty then all hosts are allowed.
-        /// Failing to restrict this these values may allow an attacker to spoof links generated by your service. 
-        /// </summary>
-        /// <remarks>
-        /// <list type="bullet">
-        /// <item><description>Port numbers must be excluded.</description></item>
-        /// <item><description>A top level wildcard "*" allows all non-empty hosts.</description></item>
-        /// <item><description>Subdomain wildcards are permitted. E.g. "*.example.com" matches subdomains like foo.example.com,
-        ///    but not the parent domain example.com.</description></item>
-        /// <item><description>Unicode host names are allowed but will be converted to punycode for matching.</description></item>
-        /// <item><description>IPv6 addresses must include their bounding brackets and be in their normalized form.</description></item>
-        /// </list>
-        /// </remarks>
-        public IList<string> AllowedHosts { get; set;  } = new List<string>();
+    /// <summary>
+    /// Limits the number of entries in the headers that will be processed. The default value is 1.
+    /// Set to null to disable the limit, but this should only be done if
+    /// KnownProxies or KnownNetworks are configured.
+    /// </summary>
+    public int? ForwardLimit { get; set; } = 1;
 
-        /// <summary>
-        /// Require the number of header values to be in sync between the different headers being processed.
-        /// The default is 'false'.
-        /// </summary>
-        public bool RequireHeaderSymmetry { get; set; } = false;
-    }
+    /// <summary>
+    /// Addresses of known proxies to accept forwarded headers from.
+    /// </summary>
+    public IList<IPAddress> KnownProxies { get; } = new List<IPAddress>() { IPAddress.IPv6Loopback };
+
+    /// <summary>
+    /// Address ranges of known proxies to accept forwarded headers from.
+    /// Obsolete, please use <see cref="KnownIPNetworks"/> instead
+    /// </summary>
+    [Obsolete("Please use KnownIPNetworks instead. For more information, visit https://aka.ms/aspnet/deprecate/005.", DiagnosticId = "ASPDEPR005", UrlFormat = Obsoletions.AspNetCoreDeprecate005Url)]
+    public IList<AspNetIPNetwork> KnownNetworks => _knownNetworks;
+
+    /// <summary>
+    /// Address ranges of known proxies to accept forwarded headers from.
+    /// </summary>
+    public IList<IPNetwork> KnownIPNetworks => _knownNetworks;
+
+    /// <summary>
+    /// The allowed values from x-forwarded-host. If the list is empty then all hosts are allowed.
+    /// Failing to restrict this these values may allow an attacker to spoof links generated by your service.
+    /// </summary>
+    /// <remarks>
+    /// <list type="bullet">
+    /// <item><description>Port numbers must be excluded.</description></item>
+    /// <item><description>A top level wildcard "*" allows all non-empty hosts.</description></item>
+    /// <item><description>Subdomain wildcards are permitted. E.g. "*.example.com" matches subdomains like foo.example.com,
+    ///    but not the parent domain example.com.</description></item>
+    /// <item><description>Unicode host names are allowed but will be converted to punycode for matching.</description></item>
+    /// <item><description>IPv6 addresses must include their bounding brackets and be in their normalized form.</description></item>
+    /// </list>
+    /// </remarks>
+    public IList<string> AllowedHosts { get; set; } = new List<string>();
+
+    /// <summary>
+    /// Require the number of header values to be in sync between the different headers being processed.
+    /// The default is 'false'.
+    /// </summary>
+    public bool RequireHeaderSymmetry { get; set; }
 }

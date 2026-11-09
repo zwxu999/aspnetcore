@@ -1,16 +1,28 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 
-namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal
-{
-    internal class ServerAddressesFeature : IServerAddressesFeature
-    {
-        public ServerAddressesCollection InternalCollection { get; } = new ServerAddressesCollection();
+namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal;
 
-        ICollection<string> IServerAddressesFeature.Addresses => InternalCollection.PublicCollection;
-        public bool PreferHostingUrls { get; set; }
+[DebuggerDisplay("{DebuggerToString(),nq}")]
+[DebuggerTypeProxy(typeof(ServerAddressesFeatureDebugView))]
+internal sealed class ServerAddressesFeature : IServerAddressesFeature
+{
+    public ServerAddressesCollection InternalCollection { get; } = new ServerAddressesCollection();
+
+    ICollection<string> IServerAddressesFeature.Addresses => InternalCollection.PublicCollection;
+    public bool PreferHostingUrls { get; set; }
+
+    private string DebuggerToString() => $"Addresses = {InternalCollection.Count}";
+
+    private sealed class ServerAddressesFeatureDebugView(ServerAddressesFeature feature)
+    {
+        private readonly ServerAddressesFeature _feature = feature;
+
+        [DebuggerBrowsable(DebuggerBrowsableState.RootHidden)]
+        public string[] Items => _feature.InternalCollection.ToArray();
     }
 }

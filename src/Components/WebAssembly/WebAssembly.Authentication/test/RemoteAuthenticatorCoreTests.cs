@@ -1,709 +1,846 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
-using System.Collections.Generic;
 using System.Runtime.ExceptionServices;
 using System.Security.Claims;
-using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.RenderTree;
 using Microsoft.AspNetCore.Components.WebAssembly.Authentication.Internal;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging.Testing;
 using Microsoft.Extensions.Options;
 using Microsoft.JSInterop;
 using Moq;
-using Xunit;
 
-namespace Microsoft.AspNetCore.Components.WebAssembly.Authentication
+namespace Microsoft.AspNetCore.Components.WebAssembly.Authentication;
+
+public class RemoteAuthenticatorCoreTests
 {
-    public class RemoteAuthenticatorCoreTests
+    private const string _action = nameof(RemoteAuthenticatorViewCore<RemoteAuthenticationState>.Action);
+    private const string _onLogInSucceded = nameof(RemoteAuthenticatorViewCore<RemoteAuthenticationState>.OnLogInSucceeded);
+    private const string _onLogOutSucceeded = nameof(RemoteAuthenticatorViewCore<RemoteAuthenticationState>.OnLogOutSucceeded);
+
+    [Fact]
+    public async Task AuthenticationManager_Throws_ForInvalidAction()
     {
-        private const string _action = nameof(RemoteAuthenticatorViewCore<RemoteAuthenticationState>.Action);
-        private const string _onLogInSucceded = nameof(RemoteAuthenticatorViewCore<RemoteAuthenticationState>.OnLogInSucceeded);
-        private const string _onLogOutSucceeded = nameof(RemoteAuthenticatorViewCore<RemoteAuthenticationState>.OnLogOutSucceeded);
+        // Arrange
+        var remoteAuthenticator = new RemoteAuthenticatorViewCore<RemoteAuthenticationState>();
 
-        [Fact]
-        public async Task AuthenticationManager_Throws_ForInvalidAction()
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
         {
-            // Arrange
-            var remoteAuthenticator = new RemoteAuthenticatorViewCore<RemoteAuthenticationState>();
+            [_action] = ""
+        });
 
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = ""
-            });
+        // Act & assert
+        await Assert.ThrowsAsync<NullReferenceException>(() => remoteAuthenticator.SetParametersAsync(parameters));
+    }
 
-            // Act & assert
-            await Assert.ThrowsAsync<InvalidOperationException>(() => remoteAuthenticator.SetParametersAsync(parameters));
-        }
+    [Fact]
+    public async Task AuthenticationManager_Login_NavigatesToReturnUrlOnSuccess()
+    {
+        // Arrange
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            "https://www.example.com/base/authentication/login",
+            new InteractiveRequestOptions { Interaction = InteractionType.SignIn, ReturnUrl = "https://www.example.com/base/fetchData" }.ToState());
 
-        [Fact]
-        public async Task AuthenticationManager_Login_NavigatesToReturnUrlOnSuccess()
+        authServiceMock.SignInCallback = _ => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
         {
-            // Arrange
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                "https://www.example.com/base/authentication/login?returnUrl=https://www.example.com/base/fetchData");
+            Status = RemoteAuthenticationStatus.Success,
+            State = remoteAuthenticator.AuthenticationState
+        });
 
-            authServiceMock.SignInCallback = _ => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.Success,
-                State = remoteAuthenticator.AuthenticationState
-            });
-
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogIn
-            });
-
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
-
-            // Assert
-            Assert.Equal("https://www.example.com/base/fetchData", jsRuntime.LastInvocation.args[0]);
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_Login_DoesNothingOnRedirect()
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
         {
-            // Arrange
-            var originalUrl = "https://www.example.com/base/authentication/login?returnUrl=https://www.example.com/base/fetchData";
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(originalUrl);
+            [_action] = RemoteAuthenticationActions.LogIn
+        });
 
-            authServiceMock.SignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.Redirect,
-                State = remoteAuthenticator.AuthenticationState
-            });
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
 
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogIn
-            });
+        // Assert
+        Assert.Equal("https://www.example.com/base/fetchData", remoteAuthenticator.Navigation.Uri);
+    }
 
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
+    [Fact]
+    public async Task AuthenticationManager_Login_DoesNothingOnRedirect()
+    {
+        // Arrange
+        var originalUrl = "https://www.example.com/base/authentication/login";
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            originalUrl,
+            new InteractiveRequestOptions { Interaction = InteractionType.SignIn, ReturnUrl = "https://www.example.com/base/fetchData" }.ToState());
 
-            // Assert
-            Assert.Equal(originalUrl, remoteAuthenticator.Navigation.Uri);
-
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_Login_NavigatesToLoginFailureOnError()
+        authServiceMock.SignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
         {
-            // Arrange
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                "https://www.example.com/base/authentication/login?returnUrl=https://www.example.com/base/fetchData");
+            Status = RemoteAuthenticationStatus.Redirect,
+            State = remoteAuthenticator.AuthenticationState
+        });
 
-            authServiceMock.SignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.Failure,
-                ErrorMessage = "There was an error trying to log in"
-            });
-
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogIn
-            });
-
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
-
-            // Assert
-            Assert.Equal("https://www.example.com/base/authentication/login-failed", remoteAuthenticator.Navigation.Uri.ToString());
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_LoginCallback_ThrowsOnRedirectResult()
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
         {
-            // Arrange
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                "https://www.example.com/base/authentication/login?returnUrl=https://www.example.com/base/fetchData");
+            [_action] = RemoteAuthenticationActions.LogIn
+        });
 
-            authServiceMock.CompleteSignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.Redirect
-            });
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
 
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogInCallback
-            });
+        // Assert
+        Assert.Equal(originalUrl, remoteAuthenticator.Navigation.Uri);
 
-            await Assert.ThrowsAsync<InvalidOperationException>(
-                async () => await renderer.Dispatcher.InvokeAsync<object>(async () =>
-                {
-                    await remoteAuthenticator.SetParametersAsync(parameters);
-                    return null;
-                }));
-        }
+    }
 
-        [Fact]
-        public async Task AuthenticationManager_LoginCallback_DoesNothingOnOperationCompleted()
+    [Fact]
+    public async Task AuthenticationManager_Login_NavigatesToLoginFailureOnError()
+    {
+        // Arrange
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            "https://www.example.com/base/authentication/login",
+            new InteractiveRequestOptions { Interaction = InteractionType.SignIn, ReturnUrl = "https://www.example.com/base/fetchData" }.ToState());
+
+        authServiceMock.SignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
         {
-            // Arrange
-            var originalUrl = "https://www.example.com/base/authentication/login-callback?code=1234";
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                originalUrl);
+            Status = RemoteAuthenticationStatus.Failure,
+            ErrorMessage = "There was an error trying to log in."
+        });
 
-            authServiceMock.CompleteSignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.OperationCompleted
-            });
-
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogInCallback
-            });
-
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
-
-            // Assert
-            Assert.Equal(originalUrl, remoteAuthenticator.Navigation.Uri);
-
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_LoginCallback_NavigatesToReturnUrlFromStateOnSuccess()
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
         {
-            // Arrange
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                "https://www.example.com/base/authentication/login-callback?code=1234");
+            [_action] = RemoteAuthenticationActions.LogIn
+        });
 
-            var fetchDataUrl = "https://www.example.com/base/fetchData";
-            remoteAuthenticator.AuthenticationState.ReturnUrl = fetchDataUrl;
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
 
-            authServiceMock.CompleteSignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.Success,
-                State = remoteAuthenticator.AuthenticationState
-            });
+        // Assert
+        Assert.Equal("https://www.example.com/base/authentication/login-failed", remoteAuthenticator.Navigation.Uri.ToString());
+        Assert.Equal("There was an error trying to log in.", remoteAuthenticator.Navigation.HistoryEntryState);
+    }
 
-            var loggingSucceededCalled = false;
+    [Fact]
+    public async Task AuthenticationManager_LoginCallback_ThrowsOnRedirectResult()
+    {
+        // Arrange
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            "https://www.example.com/base/authentication/");
 
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogInCallback,
-                [_onLogInSucceded] = new EventCallbackFactory().Create<RemoteAuthenticationState>(
-                    remoteAuthenticator,
-                    (state) => loggingSucceededCalled = true),
-            });
-
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
-
-            // Assert
-            Assert.Equal(fetchDataUrl, jsRuntime.LastInvocation.args[0]);
-            Assert.True(loggingSucceededCalled);
-
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_LoginCallback_NavigatesToLoginFailureOnError()
+        authServiceMock.CompleteSignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
         {
-            // Arrange
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                "https://www.example.com/base/authentication/login-callback?code=1234");
+            Status = RemoteAuthenticationStatus.Redirect
+        });
 
-            var fetchDataUrl = "https://www.example.com/base/fetchData";
-            remoteAuthenticator.AuthenticationState.ReturnUrl = fetchDataUrl;
-
-            authServiceMock.CompleteSignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.Failure,
-                ErrorMessage = "There was an error trying to log in"
-            });
-
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogInCallback
-            });
-
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
-
-            // Assert
-            Assert.Equal(
-                "https://www.example.com/base/authentication/login-failed?message=There was an error trying to log in",
-                jsRuntime.LastInvocation.args[0]);
-
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_Logout_NavigatesToReturnUrlOnSuccess()
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
         {
-            // Arrange
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                "https://www.example.com/base/authentication/logout?returnUrl=https://www.example.com/base/");
+            [_action] = RemoteAuthenticationActions.LogInCallback
+        });
 
-            authServiceMock.GetAuthenticatedUserCallback = () => new ValueTask<ClaimsPrincipal>(new ClaimsPrincipal(new ClaimsIdentity("Test")));
-
-            authServiceMock.SignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await renderer.Dispatcher.InvokeAsync<object>(async () =>
             {
-                Status = RemoteAuthenticationStatus.Success,
-                State = remoteAuthenticator.AuthenticationState
-            });
+                await remoteAuthenticator.SetParametersAsync(parameters);
+                return null;
+            }));
+    }
 
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogOut
-            });
+    [Fact]
+    public async Task AuthenticationManager_LoginCallback_DoesNothingOnOperationCompleted()
+    {
+        // Arrange
+        var originalUrl = "https://www.example.com/base/authentication/login-callback?code=1234";
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            originalUrl);
 
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
-
-            // Assert
-            Assert.Equal("https://www.example.com/base/", jsRuntime.LastInvocation.args[0]);
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_Logout_NavigatesToDefaultReturnUrlWhenNoReturnUrlIsPresent()
+        authServiceMock.CompleteSignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
         {
-            // Arrange
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                "https://www.example.com/base/authentication/logout");
+            Status = RemoteAuthenticationStatus.OperationCompleted
+        });
 
-            authServiceMock.GetAuthenticatedUserCallback = () => new ValueTask<ClaimsPrincipal>(new ClaimsPrincipal(new ClaimsIdentity("Test")));
-
-            authServiceMock.SignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.Success,
-                State = remoteAuthenticator.AuthenticationState
-            });
-
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogOut
-            });
-
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
-
-            // Assert
-            Assert.Equal("https://www.example.com/base/authentication/logged-out", jsRuntime.LastInvocation.args[0]);
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_Logout_DoesNothingOnRedirect()
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
         {
-            // Arrange
-            var originalUrl = "https://www.example.com/base/authentication/login?returnUrl=https://www.example.com/base/fetchData";
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(originalUrl);
+            [_action] = RemoteAuthenticationActions.LogInCallback
+        });
 
-            authServiceMock.GetAuthenticatedUserCallback = () => new ValueTask<ClaimsPrincipal>(new ClaimsPrincipal(new ClaimsIdentity("Test")));
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
 
-            authServiceMock.SignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.Redirect,
-                State = remoteAuthenticator.AuthenticationState
-            });
+        // Assert
+        Assert.Equal(originalUrl, remoteAuthenticator.Navigation.Uri);
+    }
 
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogOut
-            });
+    [Fact]
+    public async Task AuthenticationManager_LoginCallback_NavigatesToReturnUrlFromStateOnSuccess()
+    {
+        // Arrange
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            "https://www.example.com/base/authentication/login-callback?code=1234");
 
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
+        var fetchDataUrl = "https://www.example.com/base/fetchData";
+        remoteAuthenticator.AuthenticationState.ReturnUrl = fetchDataUrl;
 
-            // Assert
-            Assert.Equal(originalUrl, remoteAuthenticator.Navigation.Uri);
-
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_Logout_RedirectsToFailureOnInvalidSignOutState()
+        authServiceMock.CompleteSignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
         {
-            // Arrange
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                "https://www.example.com/base/authentication/logout?returnUrl=https://www.example.com/base/fetchData");
+            Status = RemoteAuthenticationStatus.Success,
+            State = remoteAuthenticator.AuthenticationState
+        });
 
-            if(remoteAuthenticator.SignOutManager is TestSignOutSessionStateManager testManager)
-            {
-                testManager.SignOutState = false;
-            }
+        var loggingSucceededCalled = false;
 
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogOut
-            });
-
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
-
-            // Assert
-            Assert.Equal(
-                "https://www.example.com/base/authentication/logout-failed?message=The%20logout%20was%20not%20initiated%20from%20within%20the%20page.",
-                remoteAuthenticator.Navigation.Uri);
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_Logout_NavigatesToLogoutFailureOnError()
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
         {
-            // Arrange
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                "https://www.example.com/base/authentication/logout?returnUrl=https://www.example.com/base/fetchData");
+            [_action] = RemoteAuthenticationActions.LogInCallback,
+            [_onLogInSucceded] = new EventCallbackFactory().Create<RemoteAuthenticationState>(
+                remoteAuthenticator,
+                (state) => loggingSucceededCalled = true),
+        });
 
-            authServiceMock.GetAuthenticatedUserCallback = () => new ValueTask<ClaimsPrincipal>(new ClaimsPrincipal(new ClaimsIdentity("Test")));
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
 
-            authServiceMock.SignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.Failure,
-                ErrorMessage = "There was an error trying to log out"
-            });
+        // Assert
+        Assert.Equal(fetchDataUrl, remoteAuthenticator.Navigation.Uri);
+        Assert.True(loggingSucceededCalled);
+    }
 
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogOut
-            });
+    [Fact]
+    public async Task AuthenticationManager_LoginCallback_NavigatesToLoginFailureOnError()
+    {
+        // Arrange
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            "https://www.example.com/base/authentication/login-callback?code=1234");
 
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
+        var fetchDataUrl = "https://www.example.com/base/fetchData";
+        remoteAuthenticator.AuthenticationState.ReturnUrl = fetchDataUrl;
 
-            // Assert
-            Assert.Equal("https://www.example.com/base/authentication/logout-failed", remoteAuthenticator.Navigation.Uri.ToString());
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_LogoutCallback_ThrowsOnRedirectResult()
+        authServiceMock.CompleteSignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
         {
-            // Arrange
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                "https://www.example.com/base/authentication/logout-callback?returnUrl=https://www.example.com/base/fetchData");
+            Status = RemoteAuthenticationStatus.Failure,
+            ErrorMessage = "There was an error trying to log in"
+        });
 
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogOutCallback
-            });
-
-            authServiceMock.CompleteSignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.Redirect,
-            });
-
-
-            await Assert.ThrowsAsync<InvalidOperationException>(
-                async () => await renderer.Dispatcher.InvokeAsync<object>(async () =>
-                {
-                    await remoteAuthenticator.SetParametersAsync(parameters);
-                    return null;
-                }));
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_LogoutCallback_DoesNothingOnOperationCompleted()
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
         {
-            // Arrange
-            var originalUrl = "https://www.example.com/base/authentication/logout-callback?code=1234";
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                originalUrl);
+            [_action] = RemoteAuthenticationActions.LogInCallback
+        });
 
-            authServiceMock.CompleteSignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.OperationCompleted
-            });
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
 
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogOutCallback
-            });
+        // Assert
+        Assert.Equal(
+            "https://www.example.com/base/authentication/login-failed",
+            remoteAuthenticator.Navigation.Uri);
 
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
+        Assert.Equal(
+            "There was an error trying to log in",
+            ((TestNavigationManager)remoteAuthenticator.Navigation).HistoryEntryState);
+    }
 
-            // Assert
-            Assert.Equal(originalUrl, remoteAuthenticator.Navigation.Uri);
-        }
+    [Fact]
+    public async Task AuthenticationManager_Callbacks_OnlyExecuteOncePerAction()
+    {
+        // Arrange
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            "https://www.example.com/base/authentication/login-callback?code=1234");
 
-        [Fact]
-        public async Task AuthenticationManager_LogoutCallback_NavigatesToReturnUrlFromStateOnSuccess()
+        authServiceMock.CompleteSignInCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
         {
-            // Arrange
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                "https://www.example.com/base/authentication/logout-callback-callback?code=1234");
+            Status = RemoteAuthenticationStatus.Success,
+        });
 
-            var fetchDataUrl = "https://www.example.com/base/fetchData";
-            remoteAuthenticator.AuthenticationState.ReturnUrl = fetchDataUrl;
-
-            authServiceMock.CompleteSignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
-            {
-                Status = RemoteAuthenticationStatus.Success,
-                State = remoteAuthenticator.AuthenticationState
-            });
-
-            var loggingOutSucceededCalled = false;
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogOutCallback,
-                [_onLogOutSucceeded] = new EventCallbackFactory().Create<RemoteAuthenticationState>(
-                    remoteAuthenticator,
-                    (state) => loggingOutSucceededCalled = true),
-
-            });
-
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
-
-            // Assert
-            Assert.Equal(fetchDataUrl, jsRuntime.LastInvocation.args[0]);
-            Assert.True(loggingOutSucceededCalled);
-
-        }
-
-        [Fact]
-        public async Task AuthenticationManager_LogoutCallback_NavigatesToLoginFailureOnError()
+        authServiceMock.CompleteSignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
         {
-            // Arrange
-            var (remoteAuthenticator, renderer, authServiceMock, jsRuntime) = CreateAuthenticationManager(
-                "https://www.example.com/base/authentication/logout-callback?code=1234");
+            Status = RemoteAuthenticationStatus.Success,
+        });
 
-            var fetchDataUrl = "https://www.example.com/base/fetchData";
-            remoteAuthenticator.AuthenticationState.ReturnUrl = fetchDataUrl;
+        var logInCallbackInvocationCount = 0;
+        var logOutCallbackInvocationCount = 0;
 
-            authServiceMock.CompleteSignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
+        var parameterDictionary = new Dictionary<string, object>
+        {
+            [_action] = RemoteAuthenticationActions.LogInCallback,
+            [_onLogInSucceded] = new EventCallbackFactory().Create<RemoteAuthenticationState>(
+                remoteAuthenticator,
+                (state) => logInCallbackInvocationCount++),
+            [_onLogOutSucceeded] = new EventCallbackFactory().Create<RemoteAuthenticationState>(
+                remoteAuthenticator,
+                (state) => logOutCallbackInvocationCount++)
+        };
+
+        var initialParameters = ParameterView.FromDictionary(parameterDictionary);
+
+        parameterDictionary[_action] = RemoteAuthenticationActions.LogOutCallback;
+
+        var finalParameters = ParameterView.FromDictionary(parameterDictionary);
+
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(initialParameters));
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(initialParameters));
+
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(finalParameters));
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(finalParameters));
+
+        // Assert
+        Assert.Equal(1, logInCallbackInvocationCount);
+        Assert.Equal(1, logOutCallbackInvocationCount);
+    }
+
+    [Fact]
+    public async Task AuthenticationManager_Logout_NavigatesToReturnUrlOnSuccess()
+    {
+        // Arrange
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            "https://www.example.com/base/authentication/logout",
+            new InteractiveRequestOptions { Interaction = InteractionType.SignOut, ReturnUrl = "https://www.example.com/base/" }.ToState());
+
+        authServiceMock.GetAuthenticatedUserCallback = () => new ValueTask<ClaimsPrincipal>(new ClaimsPrincipal(new ClaimsIdentity("Test")));
+
+        authServiceMock.SignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
+        {
+            Status = RemoteAuthenticationStatus.Success,
+            State = remoteAuthenticator.AuthenticationState
+        });
+
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
+        {
+            [_action] = RemoteAuthenticationActions.LogOut
+        });
+
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
+
+        // Assert
+        Assert.Equal("https://www.example.com/base/", remoteAuthenticator.Navigation.Uri);
+    }
+
+    [Fact]
+    public async Task AuthenticationManager_Logout_NavigatesToDefaultReturnUrlWhenNoReturnUrlIsPresent()
+    {
+        // Arrange
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            "https://www.example.com/base/authentication/logout");
+
+        authServiceMock.GetAuthenticatedUserCallback = () => new ValueTask<ClaimsPrincipal>(new ClaimsPrincipal(new ClaimsIdentity("Test")));
+
+        authServiceMock.SignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
+        {
+            Status = RemoteAuthenticationStatus.Success,
+            State = remoteAuthenticator.AuthenticationState
+        });
+
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
+        {
+            [_action] = RemoteAuthenticationActions.LogOut
+        });
+
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
+
+        // Assert
+        Assert.Equal("https://www.example.com/base/authentication/logged-out", remoteAuthenticator.Navigation.Uri);
+    }
+
+    [Fact]
+    public async Task AuthenticationManager_Logout_DoesNothingOnRedirect()
+    {
+        // Arrange
+        var originalUrl = "https://www.example.com/base/authentication/login";
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            originalUrl,
+            new InteractiveRequestOptions { Interaction = InteractionType.SignOut, ReturnUrl = "https://www.example.com/base/fetchData" }.ToState());
+
+        authServiceMock.GetAuthenticatedUserCallback = () => new ValueTask<ClaimsPrincipal>(new ClaimsPrincipal(new ClaimsIdentity("Test")));
+
+        authServiceMock.SignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
+        {
+            Status = RemoteAuthenticationStatus.Redirect,
+            State = remoteAuthenticator.AuthenticationState
+        });
+
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
+        {
+            [_action] = RemoteAuthenticationActions.LogOut
+        });
+
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
+
+        // Assert
+        Assert.Equal(originalUrl, remoteAuthenticator.Navigation.Uri);
+
+    }
+
+    [Fact]
+    public async Task AuthenticationManager_Logout_NavigatesToLogoutFailureOnError()
+    {
+        // Arrange
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            "https://www.example.com/base/authentication/logout",
+            new InteractiveRequestOptions { Interaction = InteractionType.SignIn, ReturnUrl = "https://www.example.com/base/fetchData" }.ToState());
+
+        authServiceMock.GetAuthenticatedUserCallback = () => new ValueTask<ClaimsPrincipal>(new ClaimsPrincipal(new ClaimsIdentity("Test")));
+
+        authServiceMock.SignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
+        {
+            Status = RemoteAuthenticationStatus.Failure,
+            ErrorMessage = "There was an error trying to log out"
+        });
+
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
+        {
+            [_action] = RemoteAuthenticationActions.LogOut
+        });
+
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
+
+        // Assert
+        Assert.Equal("https://www.example.com/base/authentication/logout-failed", remoteAuthenticator.Navigation.Uri.ToString());
+    }
+
+    [Fact]
+    public async Task AuthenticationManager_LogoutCallback_ThrowsOnRedirectResult()
+    {
+        // Arrange
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            "https://www.example.com/base/authentication/logout-callback",
+            new InteractiveRequestOptions { Interaction = InteractionType.SignIn, ReturnUrl = "https://www.example.com/base/fetchData" }.ToState());
+
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
+        {
+            [_action] = RemoteAuthenticationActions.LogOutCallback
+        });
+
+        authServiceMock.CompleteSignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
+        {
+            Status = RemoteAuthenticationStatus.Redirect,
+        });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await renderer.Dispatcher.InvokeAsync<object>(async () =>
             {
-                Status = RemoteAuthenticationStatus.Failure,
-                ErrorMessage = "There was an error trying to log out"
-            });
+                await remoteAuthenticator.SetParametersAsync(parameters);
+                return null;
+            }));
+    }
 
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
-            {
-                [_action] = RemoteAuthenticationActions.LogOutCallback
-            });
+    [Fact]
+    public async Task AuthenticationManager_LogoutCallback_DoesNothingOnOperationCompleted()
+    {
+        // Arrange
+        var originalUrl = "https://www.example.com/base/authentication/logout-callback?code=1234";
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            originalUrl);
 
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
+        authServiceMock.CompleteSignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
+        {
+            Status = RemoteAuthenticationStatus.OperationCompleted
+        });
 
-            // Assert
-            Assert.Equal(
-                "https://www.example.com/base/authentication/logout-failed?message=There was an error trying to log out",
-                jsRuntime.LastInvocation.args[0]);
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
+        {
+            [_action] = RemoteAuthenticationActions.LogOutCallback
+        });
 
-        }
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
 
-        public static TheoryData<UIValidator> DisplaysRightUIData { get; } = new TheoryData<UIValidator>
+        // Assert
+        Assert.Equal(originalUrl, remoteAuthenticator.Navigation.Uri);
+    }
+
+    [Fact]
+    public async Task AuthenticationManager_LogoutCallback_NavigatesToReturnUrlFromStateOnSuccess()
+    {
+        // Arrange
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            "https://www.example.com/base/authentication/logout-callback-callback?code=1234");
+
+        var fetchDataUrl = "https://www.example.com/base/fetchData";
+        remoteAuthenticator.AuthenticationState.ReturnUrl = fetchDataUrl;
+
+        authServiceMock.CompleteSignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
+        {
+            Status = RemoteAuthenticationStatus.Success,
+            State = remoteAuthenticator.AuthenticationState
+        });
+
+        var loggingOutSucceededCalled = false;
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
+        {
+            [_action] = RemoteAuthenticationActions.LogOutCallback,
+            [_onLogOutSucceeded] = new EventCallbackFactory().Create<RemoteAuthenticationState>(
+                remoteAuthenticator,
+                (state) => loggingOutSucceededCalled = true),
+
+        });
+
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
+
+        // Assert
+        Assert.Equal(fetchDataUrl, remoteAuthenticator.Navigation.Uri);
+        Assert.True(loggingOutSucceededCalled);
+
+    }
+
+    [Fact]
+    public async Task AuthenticationManager_LogoutCallback_NavigatesToLoginFailureOnError()
+    {
+        // Arrange
+        var (remoteAuthenticator, renderer, authServiceMock) = CreateAuthenticationManager(
+            "https://www.example.com/base/authentication/logout-callback?code=1234");
+
+        var fetchDataUrl = "https://www.example.com/base/fetchData";
+        remoteAuthenticator.AuthenticationState.ReturnUrl = fetchDataUrl;
+
+        authServiceMock.CompleteSignOutCallback = s => Task.FromResult(new RemoteAuthenticationResult<RemoteAuthenticationState>()
+        {
+            Status = RemoteAuthenticationStatus.Failure,
+            ErrorMessage = "There was an error trying to log out"
+        });
+
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
+        {
+            [_action] = RemoteAuthenticationActions.LogOutCallback
+        });
+
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => remoteAuthenticator.SetParametersAsync(parameters));
+
+        // Assert
+        Assert.Equal(
+            "https://www.example.com/base/authentication/logout-failed",
+            remoteAuthenticator.Navigation.Uri);
+
+        Assert.Equal(
+            "There was an error trying to log out",
+            ((TestNavigationManager)remoteAuthenticator.Navigation).HistoryEntryState);
+    }
+
+    public static TheoryData<UIValidator> DisplaysRightUIData { get; } = new TheoryData<UIValidator>
         {
             { new UIValidator {
-                Action = "login", SetupAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LoggingIn = validator.Render; } }
+                Action = "login", SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LoggingIn = validator.FakeRender; } }
             },
             { new UIValidator {
-                Action = "login-callback", SetupAction = (validator, remoteAuthenticator) => { remoteAuthenticator.CompletingLoggingIn = validator.Render; } }
+                Action = "login-callback", SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.CompletingLoggingIn = validator.FakeRender; } }
             },
             { new UIValidator {
-                Action = "login-failed", SetupAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LogInFailed = m => builder => validator.Render(builder); } }
+                Action = "login-failed", SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LogInFailed = m => builder => validator.FakeRender(builder); } }
             },
             { new UIValidator {
-                Action = "profile", SetupAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LoggingIn = validator.Render; } }
+                Action = "profile", SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LoggingIn = validator.FakeRender; } }
             },
             // Profile fragment overrides
             { new UIValidator {
-                Action = "profile", SetupAction = (validator, remoteAuthenticator) => { remoteAuthenticator.UserProfile = validator.Render; } }
+                Action = "profile", SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.UserProfile = validator.FakeRender; } }
             },
             { new UIValidator {
-                Action = "register", SetupAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LoggingIn = validator.Render; } }
+                Action = "register", SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LoggingIn = validator.FakeRender; } }
             },
             // Register fragment overrides
             { new UIValidator {
-                Action = "register", SetupAction = (validator, remoteAuthenticator) => { remoteAuthenticator.Registering = validator.Render; } }
+                Action = "register", SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.Registering = validator.FakeRender; } }
             },
             { new UIValidator {
-                Action = "logout", SetupAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LogOut = validator.Render; } }
+                Action = "logout", SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LogOut = validator.FakeRender; } }
             },
             { new UIValidator {
-                Action = "logout-callback", SetupAction = (validator, remoteAuthenticator) => { remoteAuthenticator.CompletingLogOut = validator.Render; } }
+                Action = "logout-callback", SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.CompletingLogOut = validator.FakeRender; } }
             },
             { new UIValidator {
-                Action = "logout-failed", SetupAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LogOutFailed = m => builder => validator.Render(builder); } }
+                Action = "logout-failed", SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LogOutFailed = m => builder => validator.FakeRender(builder); } }
             },
             { new UIValidator {
-                Action = "logged-out", SetupAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LogOutSucceeded = validator.Render; } }
+                Action = "logged-out", SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.LogOutSucceeded = validator.FakeRender; } }
             },
         };
 
-        [Theory]
-        [MemberData(nameof(DisplaysRightUIData))]
-        public async Task AuthenticationManager_DisplaysRightUI_ForEachStateAsync(UIValidator validator)
-        {
-            // Arrange
-            var renderer = new TestRenderer(new ServiceCollection().BuildServiceProvider());
-            var authenticator = new TestRemoteAuthenticatorView();
-            renderer.Attach(authenticator);
-            validator.Setup(authenticator);
+    [Theory]
+    [MemberData(nameof(DisplaysRightUIData))]
+    public async Task AuthenticationManager_DisplaysRightUI_ForEachStateAsync(UIValidator validator)
+    {
+        // Arrange
+        var renderer = new TestRenderer(new ServiceCollection().BuildServiceProvider());
+        var testNavigationManager = new TestNavigationManager("https://www.example.com/", "Some error message.", "https://www.example.com/");
+        var logger = new TestLoggerFactory(new TestSink(), false).CreateLogger<RemoteAuthenticatorViewCore<RemoteAuthenticationState>>();
+        var authenticator = new TestRemoteAuthenticatorView(testNavigationManager);
+        authenticator.Logger = logger;
+        renderer.Attach(authenticator);
+        validator.SetupFakeRender(authenticator);
 
-            var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
+        {
+            [_action] = validator.Action
+        });
+
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => authenticator.SetParametersAsync(parameters));
+
+        // Assert
+        Assert.True(validator.WasCalled);
+    }
+
+    [Theory]
+    [MemberData(nameof(DisplaysRightUIData))]
+    public async Task AuthenticationManager_DoesNotThrowExceptionOnDisplaysUI_WhenPathsAreMissing(UIValidator validator)
+    {
+        // Arrange
+        var renderer = new TestRenderer(new ServiceCollection().BuildServiceProvider());
+        var testNavigationManager = new TestNavigationManager("https://www.example.com/", "Some error message.", "https://www.example.com/");
+        var logger = new TestLoggerFactory(new TestSink(), false).CreateLogger<RemoteAuthenticatorViewCore<RemoteAuthenticationState>>();
+        var authenticator = new TestRemoteAuthenticatorView(new RemoteAuthenticationApplicationPathsOptions(), testNavigationManager);
+        authenticator.Logger = logger;
+        renderer.Attach(authenticator);
+        validator.SetupFakeRender(authenticator);
+
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
+        {
+            [_action] = validator.Action
+        });
+
+        // Act
+        Task result = await renderer.Dispatcher.InvokeAsync<Task>(() => authenticator.SetParametersAsync(parameters));
+
+        // Assert
+        Assert.Null(result.Exception);
+    }
+
+    public static TheoryData<UIValidator, string> DisplaysRightUIWhenPathsAreMissingData { get; } = new TheoryData<UIValidator, string>
+        {
+            // Profile fragment overrides
             {
-                [_action] = validator.Action
-            });
-
-            // Act
-            await renderer.Dispatcher.InvokeAsync<object>(() => authenticator.SetParametersAsync(parameters));
-
-            // Assert
-            Assert.True(validator.WasCalled);
-        }
-
-        public class UIValidator
-        {
-            public string Action { get; set; }
-            public Action<UIValidator, RemoteAuthenticatorViewCore<RemoteAuthenticationState>> SetupAction { get; set; }
-            public bool WasCalled { get; set; }
-            public RenderFragment Render { get; set; }
-
-            public UIValidator() => Render = builder => WasCalled = true;
-
-            internal void Setup(TestRemoteAuthenticatorView manager) => SetupAction(this, manager);
-        }
-
-        private static
-            (RemoteAuthenticatorViewCore<RemoteAuthenticationState> manager,
-            TestRenderer renderer,
-            TestRemoteAuthenticationService authenticationServiceMock,
-            TestJsRuntime js)
-
-            CreateAuthenticationManager(
-            string currentUri,
-            string baseUri = "https://www.example.com/base/")
-        {
-            var renderer = new TestRenderer(new ServiceCollection().BuildServiceProvider());
-            var remoteAuthenticator = new RemoteAuthenticatorViewCore<RemoteAuthenticationState>();
-            renderer.Attach(remoteAuthenticator);
-
-            var navigationManager = new TestNavigationManager(
-                baseUri,
-                currentUri);
-            remoteAuthenticator.Navigation = navigationManager;
-
-            remoteAuthenticator.AuthenticationState = new RemoteAuthenticationState();
-            remoteAuthenticator.ApplicationPaths = new RemoteAuthenticationApplicationPathsOptions();
-
-            var jsRuntime = new TestJsRuntime();
-            var authenticationServiceMock = new TestRemoteAuthenticationService(
-                jsRuntime,
-                Mock.Of<IOptions<RemoteAuthenticationOptions<OidcProviderOptions>>>(),
-                navigationManager);
-
-            remoteAuthenticator.SignOutManager = new TestSignOutSessionStateManager();
-
-            remoteAuthenticator.AuthenticationService = authenticationServiceMock;
-            remoteAuthenticator.AuthenticationProvider = authenticationServiceMock;
-            remoteAuthenticator.JS = jsRuntime;
-            return (remoteAuthenticator, renderer, authenticationServiceMock, jsRuntime);
-        }
-
-        private class TestNavigationManager : NavigationManager
-        {
-            public TestNavigationManager(string baseUrl, string currentUrl) => Initialize(baseUrl, currentUrl);
-
-            protected override void NavigateToCore(string uri, bool forceLoad)
-                => Uri = System.Uri.IsWellFormedUriString(uri, UriKind.Absolute) ? uri : new Uri(new Uri(BaseUri), uri).ToString();
-        }
-
-        private class TestSignOutSessionStateManager : SignOutSessionStateManager
-        {
-            public TestSignOutSessionStateManager() : base(null)
+                new UIValidator {
+                    Action = "profile",
+                    SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.UserProfile = validator.FakeRender; },
+                    RetrieveOriginalRenderAction = (validator, remoteAuthenticator) => { validator.OriginalRender =  remoteAuthenticator.UserProfile; } },
+                "ProfileNotSupportedFragment"
+            },
             {
+                new UIValidator {
+                    Action = "register",
+                    SetupFakeRenderAction = (validator, remoteAuthenticator) => { remoteAuthenticator.Registering = validator.FakeRender; },
+                    RetrieveOriginalRenderAction = (validator, remoteAuthenticator) => { validator.OriginalRender =  remoteAuthenticator.Registering; } },
+                "RegisterNotSupportedFragment"
+            }
+        };
+
+    [Theory]
+    [MemberData(nameof(DisplaysRightUIWhenPathsAreMissingData))]
+    public async Task AuthenticationManager_DisplaysRightUI_WhenPathsAreMissing(UIValidator validator, string methodName)
+    {
+        // Arrange
+        var renderer = new TestRenderer(new ServiceCollection().BuildServiceProvider());
+        var testNavigationManager = new TestNavigationManager("https://www.example.com/", "Some error message.", "https://www.example.com/");
+        var logger = new TestLoggerFactory(new TestSink(), false).CreateLogger<RemoteAuthenticatorViewCore<RemoteAuthenticationState>>();
+        var authenticator = new TestRemoteAuthenticatorView(new RemoteAuthenticationApplicationPathsOptions(), testNavigationManager);
+        authenticator.Logger = logger;
+        renderer.Attach(authenticator);
+
+        var parameters = ParameterView.FromDictionary(new Dictionary<string, object>
+        {
+            [_action] = validator.Action
+        });
+
+        // Act
+        await renderer.Dispatcher.InvokeAsync<object>(() => authenticator.SetParametersAsync(parameters));
+        validator.RetrieveOriginalRender(authenticator);
+        validator.SetupFakeRender(authenticator);
+        Task result = await renderer.Dispatcher.InvokeAsync<Task>(() => authenticator.SetParametersAsync(parameters));
+
+        // Assert
+        Assert.True(validator.WasCalled);
+        Assert.Equal(methodName, validator.OriginalRender.Method.Name);
+    }
+
+    public class UIValidator
+    {
+        public string Action { get; set; }
+        public Action<UIValidator, RemoteAuthenticatorViewCore<RemoteAuthenticationState>> SetupFakeRenderAction { get; set; }
+        public Action<UIValidator, RemoteAuthenticatorViewCore<RemoteAuthenticationState>> RetrieveOriginalRenderAction { get; set; }
+        public bool WasCalled { get; set; }
+        public RenderFragment OriginalRender { get; set; }
+        public RenderFragment FakeRender { get; set; }
+
+        public UIValidator() => FakeRender = builder => WasCalled = true;
+
+        internal void SetupFakeRender(TestRemoteAuthenticatorView manager) => SetupFakeRenderAction(this, manager);
+        internal void RetrieveOriginalRender(TestRemoteAuthenticatorView manager) => RetrieveOriginalRenderAction(this, manager);
+    }
+
+    private static
+        (RemoteAuthenticatorViewCore<RemoteAuthenticationState> manager,
+        TestRenderer renderer,
+        TestRemoteAuthenticationService authenticationServiceMock)
+
+        CreateAuthenticationManager(
+        string currentUri,
+        string currentState = null,
+        string baseUri = "https://www.example.com/base/")
+    {
+        var renderer = new TestRenderer(new ServiceCollection().BuildServiceProvider());
+        var logger = new TestLoggerFactory(new TestSink(), false).CreateLogger<RemoteAuthenticatorViewCore<RemoteAuthenticationState>>();
+        var remoteAuthenticator = new RemoteAuthenticatorViewCore<RemoteAuthenticationState>();
+        remoteAuthenticator.Logger = logger;
+        renderer.Attach(remoteAuthenticator);
+
+        var navigationManager = new TestNavigationManager(
+            baseUri,
+            currentState,
+            currentUri);
+        remoteAuthenticator.Navigation = navigationManager;
+
+        remoteAuthenticator.AuthenticationState = new RemoteAuthenticationState();
+        remoteAuthenticator.ApplicationPaths = new RemoteAuthenticationApplicationPathsOptions();
+
+        var jsRuntime = new TestJsRuntime();
+        var authenticationServiceMock = new TestRemoteAuthenticationService(
+            jsRuntime,
+            Mock.Of<IOptionsSnapshot<RemoteAuthenticationOptions<OidcProviderOptions>>>(),
+            navigationManager);
+
+        remoteAuthenticator.AuthenticationService = authenticationServiceMock;
+        remoteAuthenticator.AuthenticationProvider = authenticationServiceMock;
+        return (remoteAuthenticator, renderer, authenticationServiceMock);
+    }
+
+    private class TestNavigationManager : NavigationManager
+    {
+        public TestNavigationManager(string baseUrl, string currentState, string currentUrl)
+        {
+            Initialize(baseUrl, currentUrl);
+            HistoryEntryState = currentState;
+        }
+
+        protected override void NavigateToCore(string uri, bool forceLoad)
+            => Uri = System.Uri.IsWellFormedUriString(uri, UriKind.Absolute) ? uri : new Uri(new Uri(BaseUri), uri).ToString();
+
+        protected override void NavigateToCore(string uri, NavigationOptions options)
+        {
+            Uri = System.Uri.IsWellFormedUriString(uri, UriKind.Absolute) ? uri : new Uri(new Uri(BaseUri), uri).ToString();
+            HistoryEntryState = options.HistoryEntryState;
+        }
+    }
+
+    private class TestJsRuntime : IJSRuntime
+    {
+        public (string identifier, object[] args) LastInvocation { get; set; }
+
+        public ValueTask<TValue> InvokeAsync<TValue>(string identifier, object[] args)
+        {
+            LastInvocation = (identifier, args);
+            return default;
+        }
+
+        public ValueTask<TValue> InvokeAsync<TValue>(string identifier, CancellationToken cancellationToken, object[] args)
+        {
+            LastInvocation = (identifier, args);
+            return default;
+        }
+
+        public ValueTask<IJSObjectReference> InvokeConstructorAsync(string identifier, object[] args)
+            => throw new NotImplementedException();
+
+        public ValueTask<IJSObjectReference> InvokeConstructorAsync(string identifier, CancellationToken cancellationToken, object[] args)
+            => throw new NotImplementedException();
+
+        public ValueTask<TValue> GetValueAsync<TValue>(string identifier)
+            => throw new NotImplementedException();
+
+        public ValueTask<TValue> GetValueAsync<TValue>(string identifier, CancellationToken cancellationToken)
+            => throw new NotImplementedException();
+
+        public ValueTask SetValueAsync<TValue>(string identifier, TValue value)
+            => throw new NotImplementedException();
+
+        public ValueTask SetValueAsync<TValue>(string identifier, TValue value, CancellationToken cancellationToken)
+            => throw new NotImplementedException();
+    }
+
+    public class TestRemoteAuthenticatorView : RemoteAuthenticatorViewCore<RemoteAuthenticationState>
+    {
+        public TestRemoteAuthenticatorView()
+            : this(new RemoteAuthenticationApplicationPathsOptions()
+            {
+                RemoteProfilePath = "Identity/Account/Manage",
+                RemoteRegisterPath = "Identity/Account/Register",
+            }, null)
+        {
+        }
+
+        public TestRemoteAuthenticatorView(NavigationManager manager)
+            : this(new RemoteAuthenticationApplicationPathsOptions()
+            {
+                RemoteProfilePath = "Identity/Account/Manage",
+                RemoteRegisterPath = "Identity/Account/Register",
+            }, manager)
+        {
+        }
+
+        public TestRemoteAuthenticatorView(RemoteAuthenticationApplicationPathsOptions applicationPaths, NavigationManager testNavigationManager)
+        {
+            ApplicationPaths = applicationPaths;
+            Navigation = testNavigationManager;
+        }
+
+        protected override Task OnParametersSetAsync()
+        {
+            if (Action == "register" || Action == "profile")
+            {
+                return base.OnParametersSetAsync();
             }
 
-            public bool SignOutState { get; set; } = true;
-
-            public override ValueTask SetSignOutState()
-            {
-                SignOutState = true;
-                return default;
-            }
-
-            public override Task<bool> ValidateSignOutState() => Task.FromResult(SignOutState);
+            return Task.CompletedTask;
         }
+    }
 
-        private class TestJsRuntime : IJSRuntime
+    private class TestRemoteAuthenticationService : RemoteAuthenticationService<RemoteAuthenticationState, RemoteUserAccount, OidcProviderOptions>
+    {
+        public TestRemoteAuthenticationService(
+            IJSRuntime jsRuntime,
+            IOptionsSnapshot<RemoteAuthenticationOptions<OidcProviderOptions>> options,
+            TestNavigationManager navigationManager) :
+            base(jsRuntime, options, navigationManager, new AccountClaimsPrincipalFactory<RemoteUserAccount>(Mock.Of<IAccessTokenProviderAccessor>()), null)
         {
-            public (string identifier, object[] args) LastInvocation { get; set; }
-            public ValueTask<TValue> InvokeAsync<TValue>(string identifier, object[] args)
-            {
-                LastInvocation = (identifier, args);
-                return default;
-            }
-
-            public ValueTask<TValue> InvokeAsync<TValue>(string identifier, CancellationToken cancellationToken, object[] args)
-            {
-                LastInvocation = (identifier, args);
-                return default;
-            }
         }
 
-        public class TestRemoteAuthenticatorView : RemoteAuthenticatorViewCore<RemoteAuthenticationState>
+        public Func<RemoteAuthenticationContext<RemoteAuthenticationState>, Task<RemoteAuthenticationResult<RemoteAuthenticationState>>> SignInCallback { get; set; }
+        public Func<RemoteAuthenticationContext<RemoteAuthenticationState>, Task<RemoteAuthenticationResult<RemoteAuthenticationState>>> CompleteSignInCallback { get; set; }
+        public Func<RemoteAuthenticationContext<RemoteAuthenticationState>, Task<RemoteAuthenticationResult<RemoteAuthenticationState>>> SignOutCallback { get; set; }
+        public Func<RemoteAuthenticationContext<RemoteAuthenticationState>, Task<RemoteAuthenticationResult<RemoteAuthenticationState>>> CompleteSignOutCallback { get; set; }
+        public Func<ValueTask<ClaimsPrincipal>> GetAuthenticatedUserCallback { get; set; }
+
+        public override async Task<AuthenticationState> GetAuthenticationStateAsync() => new AuthenticationState(await GetAuthenticatedUserCallback());
+
+        public override Task<RemoteAuthenticationResult<RemoteAuthenticationState>> CompleteSignInAsync(RemoteAuthenticationContext<RemoteAuthenticationState> context) => CompleteSignInCallback(context);
+
+        protected internal override ValueTask<ClaimsPrincipal> GetAuthenticatedUser() => GetAuthenticatedUserCallback();
+
+        public override Task<RemoteAuthenticationResult<RemoteAuthenticationState>> CompleteSignOutAsync(RemoteAuthenticationContext<RemoteAuthenticationState> context) => CompleteSignOutCallback(context);
+
+        public override Task<RemoteAuthenticationResult<RemoteAuthenticationState>> SignInAsync(RemoteAuthenticationContext<RemoteAuthenticationState> context) => SignInCallback(context);
+
+        public override Task<RemoteAuthenticationResult<RemoteAuthenticationState>> SignOutAsync(RemoteAuthenticationContext<RemoteAuthenticationState> context) => SignOutCallback(context);
+    }
+
+    private class TestRenderer : Renderer
+    {
+        public TestRenderer(IServiceProvider services)
+            : base(services, NullLoggerFactory.Instance)
         {
-            public TestRemoteAuthenticatorView()
-            {
-                ApplicationPaths = new RemoteAuthenticationApplicationPathsOptions()
-                {
-                    RemoteProfilePath = "Identity/Account/Manage",
-                    RemoteRegisterPath = "Identity/Account/Register",
-                };
-            }
-
-            protected override Task OnParametersSetAsync()
-            {
-                if (Action == "register" || Action == "profile")
-                {
-                    return base.OnParametersSetAsync();
-                }
-
-                return Task.CompletedTask;
-            }
         }
 
-        private class TestRemoteAuthenticationService : RemoteAuthenticationService<RemoteAuthenticationState, RemoteUserAccount, OidcProviderOptions>
-        {
-            public TestRemoteAuthenticationService(
-                IJSRuntime jsRuntime,
-                IOptions<RemoteAuthenticationOptions<OidcProviderOptions>> options,
-                TestNavigationManager navigationManager) :
-                base(jsRuntime, options, navigationManager, new AccountClaimsPrincipalFactory<RemoteUserAccount>(Mock.Of<IAccessTokenProviderAccessor>()))
-            {
-            }
+        public int Attach(IComponent component) => AssignRootComponentId(component);
 
-            public Func<RemoteAuthenticationContext<RemoteAuthenticationState>, Task<RemoteAuthenticationResult<RemoteAuthenticationState>>> SignInCallback { get; set; }
-            public Func<RemoteAuthenticationContext<RemoteAuthenticationState>, Task<RemoteAuthenticationResult<RemoteAuthenticationState>>> CompleteSignInCallback { get; set; }
-            public Func<RemoteAuthenticationContext<RemoteAuthenticationState>, Task<RemoteAuthenticationResult<RemoteAuthenticationState>>> SignOutCallback { get; set; }
-            public Func<RemoteAuthenticationContext<RemoteAuthenticationState>, Task<RemoteAuthenticationResult<RemoteAuthenticationState>>> CompleteSignOutCallback { get; set; }
-            public Func<ValueTask<ClaimsPrincipal>> GetAuthenticatedUserCallback { get; set; }
+        private static readonly Dispatcher _dispatcher = Dispatcher.CreateDefault();
 
-            public async override Task<AuthenticationState> GetAuthenticationStateAsync() => new AuthenticationState(await GetAuthenticatedUserCallback());
+        public override Dispatcher Dispatcher => _dispatcher;
 
-            public override Task<RemoteAuthenticationResult<RemoteAuthenticationState>> CompleteSignInAsync(RemoteAuthenticationContext<RemoteAuthenticationState> context) => CompleteSignInCallback(context);
+        protected override void HandleException(Exception exception)
+            => ExceptionDispatchInfo.Capture(exception).Throw();
 
-            protected internal override ValueTask<ClaimsPrincipal> GetAuthenticatedUser() => GetAuthenticatedUserCallback();
-
-            public override Task<RemoteAuthenticationResult<RemoteAuthenticationState>> CompleteSignOutAsync(RemoteAuthenticationContext<RemoteAuthenticationState> context) => CompleteSignOutCallback(context);
-
-            public override Task<RemoteAuthenticationResult<RemoteAuthenticationState>> SignInAsync(RemoteAuthenticationContext<RemoteAuthenticationState> context) => SignInCallback(context);
-
-            public override Task<RemoteAuthenticationResult<RemoteAuthenticationState>> SignOutAsync(RemoteAuthenticationContext<RemoteAuthenticationState> context) => SignOutCallback(context);
-        }
-
-        private class TestRenderer : Renderer
-        {
-            public TestRenderer(IServiceProvider services)
-                : base(services, NullLoggerFactory.Instance)
-            {
-            }
-
-            public int Attach(IComponent component) => AssignRootComponentId(component);
-
-            private static readonly Dispatcher _dispatcher = Dispatcher.CreateDefault();
-
-            public override Dispatcher Dispatcher => _dispatcher;
-
-            protected override void HandleException(Exception exception)
-                => ExceptionDispatchInfo.Capture(exception).Throw();
-
-            protected override Task UpdateDisplayAsync(in RenderBatch renderBatch) =>
-                Task.CompletedTask;
-        }
+        protected override Task UpdateDisplayAsync(in RenderBatch renderBatch) =>
+            Task.CompletedTask;
     }
 }

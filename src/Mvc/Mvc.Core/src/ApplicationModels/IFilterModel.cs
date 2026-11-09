@@ -1,13 +1,17 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System.Collections.Generic;
 using Microsoft.AspNetCore.Mvc.Filters;
 
-namespace Microsoft.AspNetCore.Mvc.ApplicationModels
+namespace Microsoft.AspNetCore.Mvc.ApplicationModels;
+
+/// <summary>
+/// Model that has a list of <see cref="IFilterMetadata"/>.
+/// </summary>
+public interface IFilterModel
 {
-    public interface IFilterModel
-    {
-        IList<IFilterMetadata> Filters { get; }
-    }
+    /// <summary>
+    /// List of <see cref="IFilterMetadata"/>.
+    /// </summary>
+    IList<IFilterMetadata> Filters { get; }
 }

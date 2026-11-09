@@ -1,390 +1,514 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Buffers;
-using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO.Pipelines;
 using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Connections;
+using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Hosting.Server;
-using Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3.QPack;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Infrastructure;
 
-namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3
+namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3;
+
+internal abstract class Http3ControlStream : IHttp3Stream, IThreadPoolWorkItem
 {
-    internal abstract class Http3ControlStream : IThreadPoolWorkItem
+    private const int ControlStreamTypeId = 0;
+    private const int EncoderStreamTypeId = 2;
+    private const int DecoderStreamTypeId = 3;
+
+    // Arbitrarily chosen max frame length
+    // ControlStream frames currently are very small, either a single variable length integer (max 8 bytes), two variable length integers,
+    // or in the case of SETTINGS a small collection of two variable length integers
+    // We'll use a generous value of 10k in case new optional frame(s) are added that might be a little larger than the current frames.
+    private const int MaxFrameSize = 10_000;
+
+    private readonly Http3FrameWriter _frameWriter;
+    private readonly Http3StreamContext _context;
+    private readonly Http3PeerSettings _serverPeerSettings;
+    private readonly IStreamIdFeature _streamIdFeature;
+    private readonly IStreamClosedFeature _streamClosedFeature;
+    private readonly IProtocolErrorCodeFeature _errorCodeFeature;
+    private volatile int _isClosed;
+    private long _headerType;
+    private readonly Lock _completionLock = new();
+
+    private bool _haveReceivedSettingsFrame;
+    private StreamCompletionFlags _completionState;
+
+    public bool EndStreamReceived => (_completionState & StreamCompletionFlags.EndStreamReceived) == StreamCompletionFlags.EndStreamReceived;
+    public bool IsAborted => (_completionState & StreamCompletionFlags.Aborted) == StreamCompletionFlags.Aborted;
+    public bool IsCompleted => (_completionState & StreamCompletionFlags.Completed) == StreamCompletionFlags.Completed;
+
+    public long StreamId => _streamIdFeature.StreamId;
+
+    public Http3ControlStream(Http3StreamContext context, long? headerType)
     {
-        private const int ControlStream = 0;
-        private const int EncoderStream = 2;
-        private const int DecoderStream = 3;
+        var httpLimits = context.ServiceContext.ServerOptions.Limits;
+        _context = context;
+        _serverPeerSettings = context.ServerPeerSettings;
+        _streamIdFeature = context.ConnectionFeatures.GetRequiredFeature<IStreamIdFeature>();
+        _streamClosedFeature = context.ConnectionFeatures.GetRequiredFeature<IStreamClosedFeature>();
+        _errorCodeFeature = context.ConnectionFeatures.GetRequiredFeature<IProtocolErrorCodeFeature>();
+        _headerType = headerType ?? -1;
 
-        private Http3FrameWriter _frameWriter;
-        private readonly Http3Connection _http3Connection;
-        private HttpConnectionContext _context;
-        private readonly Http3RawFrame _incomingFrame = new Http3RawFrame();
-        private volatile int _isClosed;
-        private int _gracefulCloseInitiator;
+        _frameWriter = new Http3FrameWriter(
+            context.StreamContext,
+            context.TimeoutControl,
+            httpLimits.MinResponseDataRate,
+            context.MemoryPool,
+            context.ServiceContext.Log,
+            _streamIdFeature,
+            context.ClientPeerSettings,
+            this);
+        _frameWriter.Reset(context.Transport.Output, context.ConnectionId);
 
-        private bool _haveReceivedSettingsFrame;
-
-        public Http3ControlStream(Http3Connection http3Connection, HttpConnectionContext context)
+        _streamClosedFeature.OnClosed(static state =>
         {
-            var httpLimits = context.ServiceContext.ServerOptions.Limits;
+            var stream = (Http3ControlStream)state!;
+            stream.OnStreamClosed();
+        }, this);
+    }
 
-            _http3Connection = http3Connection;
-            _context = context;
+    private void OnStreamClosed()
+    {
+        ApplyCompletionFlag(StreamCompletionFlags.Completed);
+    }
 
-            _frameWriter = new Http3FrameWriter(
-                context.Transport.Output,
-                context.ConnectionContext,
-                context.TimeoutControl,
-                httpLimits.MinResponseDataRate,
-                context.ConnectionId,
-                context.MemoryPool,
-                context.ServiceContext.Log);
-        }
+    public PipeReader Input => _context.Transport.Input;
+    public KestrelTrace Log => _context.ServiceContext.Log;
 
-        private void OnStreamClosed()
+    public long StreamTimeoutTimestamp { get; set; }
+    public bool IsReceivingHeader => _headerType == -1;
+    public bool IsReceivingTrailerHeaders => false;
+    public bool IsDraining => false;
+    public bool IsRequestStream => false;
+    public string TraceIdentifier => _context.StreamContext.ConnectionId;
+
+    public void Abort(ConnectionAbortedException abortReason, Http3ErrorCode errorCode)
+    {
+        lock (_completionLock)
         {
-            Abort(new ConnectionAbortedException("HTTP_CLOSED_CRITICAL_STREAM"));
-        }
-
-        public PipeReader Input => _context.Transport.Input;
-
-
-        public void Abort(ConnectionAbortedException ex)
-        {
-
-        }
-
-        public void HandleReadDataRateTimeout()
-        {
-            //Log.RequestBodyMinimumDataRateNotSatisfied(ConnectionId, null, Limits.MinRequestBodyDataRate.BytesPerSecond);
-            Abort(new ConnectionAbortedException(CoreStrings.BadRequest_RequestBodyTimeout));
-        }
-
-        public void HandleRequestHeadersTimeout()
-        {
-            //Log.ConnectionBadRequest(ConnectionId, KestrelBadHttpRequestException.GetException(RequestRejectionReason.RequestHeadersTimeout));
-            Abort(new ConnectionAbortedException(CoreStrings.BadRequest_RequestHeadersTimeout));
-        }
-
-        public void OnInputOrOutputCompleted()
-        {
-            TryClose();
-            _frameWriter.Abort(new ConnectionAbortedException(CoreStrings.ConnectionAbortedByClient));
-        }
-
-        private bool TryClose()
-        {
-            if (Interlocked.Exchange(ref _isClosed, 1) == 0)
-            {
-                return true;
-            }
-
-            // TODO make this actually close the Http3Stream by telling quic to close the stream.
-            return false;
-        }
-
-        private async ValueTask HandleEncodingTask()
-        {
-            var encoder = new EncoderStreamReader(10000); // TODO get value from limits
-            while (_isClosed == 0)
-            {
-                var result = await Input.ReadAsync();
-                var readableBuffer = result.Buffer;
-                if (!readableBuffer.IsEmpty)
-                {
-                    // This should always read all bytes in the input no matter what.
-                    encoder.Read(readableBuffer);
-                }
-                Input.AdvanceTo(readableBuffer.End);
-            }
-        }
-
-        private async ValueTask HandleDecodingTask()
-        {
-            var decoder = new DecoderStreamReader();
-            while (_isClosed == 0)
-            {
-                var result = await Input.ReadAsync();
-                var readableBuffer = result.Buffer;
-                var consumed = readableBuffer.Start;
-                var examined = readableBuffer.Start;
-                if (!readableBuffer.IsEmpty)
-                {
-                    decoder.Read(readableBuffer);
-                }
-                Input.AdvanceTo(readableBuffer.End);
-            }
-        }
-
-        internal async ValueTask SendStreamIdAsync(long id)
-        {
-            await _frameWriter.WriteStreamIdAsync(id);
-        }
-
-        internal async ValueTask SendGoAway(long id)
-        {
-            await _frameWriter.WriteGoAway(id);
-        }
-
-        internal async ValueTask SendSettingsFrameAsync()
-        {
-            await _frameWriter.WriteSettingsAsync(null);
-        }
-
-        private async ValueTask<long> TryReadStreamIdAsync()
-        {
-            while (_isClosed == 0)
-            {
-                var result = await Input.ReadAsync();
-                var readableBuffer = result.Buffer;
-                var consumed = readableBuffer.Start;
-                var examined = readableBuffer.End;
-
-                try
-                {
-                    if (!readableBuffer.IsEmpty)
-                    {
-                        var id = VariableLengthIntegerHelper.GetInteger(readableBuffer, out consumed, out examined);
-                        if (id != -1)
-                        {
-                            return id;
-                        }
-                    }
-
-                    if (result.IsCompleted)
-                    {
-                        return -1;
-                    }
-                }
-                finally
-                {
-                    Input.AdvanceTo(consumed, examined);
-                }
-            }
-
-            return -1;
-        }
-
-        public async Task ProcessRequestAsync<TContext>(IHttpApplication<TContext> application)
-        {
-            var streamType = await TryReadStreamIdAsync();
-
-            if (streamType == -1)
+            if (IsCompleted || IsAborted)
             {
                 return;
             }
 
-            if (streamType == ControlStream)
-            {
-                if (_http3Connection.ControlStream != null)
-                {
-                    throw new Http3ConnectionException("HTTP_STREAM_CREATION_ERROR");
-                }
+            var (oldState, newState) = ApplyCompletionFlag(StreamCompletionFlags.Aborted);
 
-                await HandleControlStream();
-            }
-            else if (streamType == EncoderStream)
+            if (oldState == newState)
             {
-                if (_http3Connection.EncoderStream != null)
-                {
-                    throw new Http3ConnectionException("HTTP_STREAM_CREATION_ERROR");
-                }
-                await HandleEncodingTask();
                 return;
             }
-            else if (streamType == DecoderStream)
-            {
-                if (_http3Connection.DecoderStream != null)
-                {
-                    throw new Http3ConnectionException("HTTP_STREAM_CREATION_ERROR");
-                }
-                await HandleDecodingTask();
-            }
-            else
-            {
-                // TODO Close the control stream as it's unexpected.
-            }
-            return;
+
+            Log.Http3StreamAbort(TraceIdentifier, errorCode, abortReason);
+
+            _errorCodeFeature.Error = (long)errorCode;
+            _frameWriter.Abort(abortReason);
+
+            Input.Complete(abortReason);
+        }
+    }
+
+    public void OnInputOrOutputCompleted()
+    {
+        TryClose();
+    }
+
+    private bool TryClose()
+    {
+        if (Interlocked.Exchange(ref _isClosed, 1) == 0)
+        {
+            Input.Complete();
+            return true;
         }
 
-        private async Task HandleControlStream()
+        return false;
+    }
+
+    private (StreamCompletionFlags OldState, StreamCompletionFlags NewState) ApplyCompletionFlag(StreamCompletionFlags completionState)
+    {
+        lock (_completionLock)
         {
-            while (_isClosed == 0)
+            var oldCompletionState = _completionState;
+            _completionState |= completionState;
+
+            return (oldCompletionState, _completionState);
+        }
+    }
+
+    internal async ValueTask ProcessOutboundSendsAsync(long id)
+    {
+        await _frameWriter.WriteStreamIdAsync(id);
+        await _frameWriter.WriteSettingsAsync(_serverPeerSettings.GetNonProtocolDefaults());
+    }
+
+    internal ValueTask<FlushResult> SendGoAway(long id)
+    {
+        Log.Http3GoAwayStreamId(_context.ConnectionId, id);
+        return _frameWriter.WriteGoAway(id);
+    }
+
+    private async ValueTask<long> TryReadStreamHeaderAsync()
+    {
+        // https://quicwg.org/base-drafts/draft-ietf-quic-http.html#section-6.2
+        while (_isClosed == 0)
+        {
+            var result = await Input.ReadAsync();
+            var readableBuffer = result.Buffer;
+            var consumed = readableBuffer.Start;
+            var examined = readableBuffer.End;
+
+            try
             {
-                var result = await Input.ReadAsync();
-                var readableBuffer = result.Buffer;
-                var consumed = readableBuffer.Start;
-                var examined = readableBuffer.End;
-
-                try
+                if (!readableBuffer.IsEmpty)
                 {
-                    if (!readableBuffer.IsEmpty)
+                    if (VariableLengthIntegerHelper.TryGetInteger(readableBuffer, out consumed, out var id))
                     {
-                        // need to kick off httpprotocol process request async here.
-                        while (Http3FrameReader.TryReadFrame(ref readableBuffer, _incomingFrame, 16 * 1024, out var framePayload))
-                        {
-                            //Log.Http2FrameReceived(ConnectionId, _incomingFrame);
-                            consumed = examined = framePayload.End;
-                            await ProcessHttp3ControlStream(framePayload);
-                        }
-                    }
-
-                    if (result.IsCompleted)
-                    {
-                        return;
+                        examined = consumed;
+                        return id;
                     }
                 }
-                catch (Http3StreamErrorException)
+
+                if (result.IsCompleted)
                 {
+                    return -1;
                 }
-                finally
-                {
-                    Input.AdvanceTo(consumed, examined);
-                }
+            }
+            finally
+            {
+                Input.AdvanceTo(consumed, examined);
             }
         }
 
-        private ValueTask ProcessHttp3ControlStream(in ReadOnlySequence<byte> payload)
+        return -1;
+    }
+
+    public async Task ProcessRequestAsync<TContext>(IHttpApplication<TContext> application) where TContext : notnull
+    {
+        try
         {
-            // Two things:
-            // settings must be sent as the first frame of each control stream by each peer
-            // Can't send more than two settings frames.
-            switch (_incomingFrame.Type)
+            // todo: the _headerType should be read earlier
+            // and by the Http3PendingStream. However, to
+            // avoid perf issues with the current implementation
+            // we can defer the reading until now
+            // (https://github.com/dotnet/aspnetcore/issues/42789)
+            if (_headerType == -1)
             {
-                case Http3FrameType.Data:
-                case Http3FrameType.Headers:
-                case Http3FrameType.DuplicatePush:
-                case Http3FrameType.PushPromise:
-                    throw new Http3ConnectionException("HTTP_FRAME_UNEXPECTED");
-                case Http3FrameType.Settings:
-                    return ProcessSettingsFrameAsync(payload);
-                case Http3FrameType.GoAway:
-                    return ProcessGoAwayFrameAsync(payload);
-                case Http3FrameType.CancelPush:
-                    return ProcessCancelPushFrameAsync();
-                case Http3FrameType.MaxPushId:
-                    return ProcessMaxPushIdFrameAsync();
+                _headerType = await TryReadStreamHeaderAsync();
+            }
+
+            _context.StreamLifetimeHandler.OnStreamHeaderReceived(this);
+
+            switch (_headerType)
+            {
+                case ControlStreamTypeId:
+                    if (!_context.StreamLifetimeHandler.OnInboundControlStream(this))
+                    {
+                        // https://quicwg.org/base-drafts/draft-ietf-quic-http.html#section-6.2.1
+                        throw new Http3ConnectionErrorException(CoreStrings.FormatHttp3ControlStreamErrorMultipleInboundStreams("control"), Http3ErrorCode.StreamCreationError, ConnectionEndReason.StreamCreationError);
+                    }
+
+                    await HandleControlStream();
+                    break;
+                case EncoderStreamTypeId:
+                    if (!_context.StreamLifetimeHandler.OnInboundEncoderStream(this))
+                    {
+                        // https://quicwg.org/base-drafts/draft-ietf-quic-qpack.html#section-4.2
+                        throw new Http3ConnectionErrorException(CoreStrings.FormatHttp3ControlStreamErrorMultipleInboundStreams("encoder"), Http3ErrorCode.StreamCreationError, ConnectionEndReason.StreamCreationError);
+                    }
+
+                    await HandleEncodingDecodingTask();
+                    break;
+                case DecoderStreamTypeId:
+                    if (!_context.StreamLifetimeHandler.OnInboundDecoderStream(this))
+                    {
+                        // https://quicwg.org/base-drafts/draft-ietf-quic-qpack.html#section-4.2
+                        throw new Http3ConnectionErrorException(CoreStrings.FormatHttp3ControlStreamErrorMultipleInboundStreams("decoder"), Http3ErrorCode.StreamCreationError, ConnectionEndReason.StreamCreationError);
+                    }
+                    await HandleEncodingDecodingTask();
+                    break;
                 default:
-                    return ProcessUnknownFrameAsync();
+                    // https://quicwg.org/base-drafts/draft-ietf-quic-http.html#section-6.2-6
+                    throw new Http3StreamErrorException(CoreStrings.FormatHttp3ControlStreamErrorUnsupportedType(_headerType), Http3ErrorCode.StreamCreationError);
             }
         }
+        catch (Http3StreamErrorException ex)
+        {
+            Abort(new ConnectionAbortedException(ex.Message), ex.ErrorCode);
+        }
+        catch (Http3ConnectionErrorException ex)
+        {
+            _errorCodeFeature.Error = (long)ex.ErrorCode;
+            _context.StreamLifetimeHandler.OnStreamConnectionError(ex);
+        }
+        finally
+        {
+            await _context.StreamContext.DisposeAsync();
 
-        private ValueTask ProcessSettingsFrameAsync(ReadOnlySequence<byte> payload)
+            ApplyCompletionFlag(StreamCompletionFlags.Completed);
+            _context.StreamLifetimeHandler.OnStreamCompleted(this);
+        }
+    }
+
+    private async Task HandleControlStream()
+    {
+        var incomingFrame = new Http3RawFrame();
+        var isContinuedFrame = false;
+        while (_isClosed == 0)
+        {
+            var result = await Input.ReadAsync();
+            var readableBuffer = result.Buffer;
+            var consumed = readableBuffer.Start;
+            var examined = readableBuffer.End;
+
+            try
+            {
+                if (!readableBuffer.IsEmpty)
+                {
+                    // need to kick off httpprotocol process request async here.
+                    while (Http3FrameReader.TryReadFrame(ref readableBuffer, incomingFrame, isContinuedFrame, out var framePayload))
+                    {
+                        Debug.Assert(incomingFrame.RemainingLength >= framePayload.Length);
+
+                        // Only log when parsing the beginning of the frame
+                        if (!isContinuedFrame)
+                        {
+                            Log.Http3FrameReceived(_context.ConnectionId, _streamIdFeature.StreamId, incomingFrame);
+                        }
+
+                        examined = framePayload.End;
+                        await ProcessHttp3ControlStream(incomingFrame, isContinuedFrame, framePayload, out consumed);
+
+                        if (incomingFrame.RemainingLength == framePayload.Length)
+                        {
+                            Debug.Assert(framePayload.Slice(0, consumed).Length == framePayload.Length);
+
+                            incomingFrame.RemainingLength = 0;
+                            isContinuedFrame = false;
+                        }
+                        else
+                        {
+                            incomingFrame.RemainingLength -= framePayload.Slice(0, consumed).Length;
+                            isContinuedFrame = true;
+
+                            Debug.Assert(incomingFrame.RemainingLength > 0);
+                        }
+                    }
+                }
+
+                if (result.IsCompleted)
+                {
+                    return;
+                }
+            }
+            finally
+            {
+                Input.AdvanceTo(consumed, examined);
+            }
+        }
+    }
+
+    private Task HandleEncodingDecodingTask()
+    {
+        // Noop encoding and decoding task. Settings make it so we don't need to read content of encoder and decoder.
+        // An endpoint MUST allow its peer to create an encoder stream and a
+        // decoder stream even if the connection's settings prevent their use.
+
+        return Input.CopyToAsync(Stream.Null);
+    }
+
+    private ValueTask ProcessHttp3ControlStream(Http3RawFrame incomingFrame, bool isContinuedFrame, in ReadOnlySequence<byte> payload, out SequencePosition consumed)
+    {
+        // default to consuming the entire payload, this is so that we don't need to set consumed from all the frame types that aren't implemented yet.
+        // individual frame types can set consumed if they're implemented and want to be able to partially consume the payload.
+        consumed = payload.End;
+        switch (incomingFrame.Type)
+        {
+            case Http3FrameType.Data:
+            case Http3FrameType.Headers:
+            case Http3FrameType.PushPromise:
+                // https://www.rfc-editor.org/rfc/rfc9114.html#section-8.1-2.12.1
+                throw new Http3ConnectionErrorException(CoreStrings.FormatHttp3ErrorUnsupportedFrameOnControlStream(incomingFrame.FormattedType), Http3ErrorCode.UnexpectedFrame, ConnectionEndReason.UnexpectedFrame);
+            case Http3FrameType.Settings:
+                CheckMaxFrameSize(incomingFrame);
+                return ProcessSettingsFrameAsync(isContinuedFrame, payload, out consumed);
+            case Http3FrameType.GoAway:
+                return ProcessGoAwayFrameAsync(isContinuedFrame, incomingFrame, payload, out consumed);
+            case Http3FrameType.CancelPush:
+                return ProcessCancelPushFrameAsync(incomingFrame, payload, out consumed);
+            case Http3FrameType.MaxPushId:
+                return ProcessMaxPushIdFrameAsync(incomingFrame, payload, out consumed);
+            default:
+                CheckMaxFrameSize(incomingFrame);
+                return ProcessUnknownFrameAsync(incomingFrame.Type);
+        }
+
+        static void CheckMaxFrameSize(Http3RawFrame http3RawFrame)
+        {
+            // Not part of the RFC, but it's a good idea to limit the size of frames when we know they're supposed to be small.
+            if (http3RawFrame.RemainingLength >= MaxFrameSize)
+            {
+                throw new Http3ConnectionErrorException(CoreStrings.FormatHttp3ControlStreamFrameTooLarge(http3RawFrame.FormattedType), Http3ErrorCode.FrameError, ConnectionEndReason.InvalidFrameLength);
+            }
+        }
+    }
+
+    private ValueTask ProcessSettingsFrameAsync(bool isContinuedFrame, ReadOnlySequence<byte> payload, out SequencePosition consumed)
+    {
+        if (!isContinuedFrame)
         {
             if (_haveReceivedSettingsFrame)
             {
-                throw new Http3ConnectionException("H3_SETTINGS_ERROR");
+                // https://www.rfc-editor.org/rfc/rfc9114.html#section-7.2.4
+                throw new Http3ConnectionErrorException(CoreStrings.Http3ErrorControlStreamMultipleSettingsFrames, Http3ErrorCode.UnexpectedFrame, ConnectionEndReason.UnexpectedFrame);
             }
 
             _haveReceivedSettingsFrame = true;
-            using var closedRegistration = _context.ConnectionContext.ConnectionClosed.Register(state => ((Http3ControlStream)state).OnStreamClosed(), this);
+        }
 
-            while (true)
+        while (true)
+        {
+            if (!VariableLengthIntegerHelper.TryGetInteger(payload, out consumed, out var id))
             {
-                var id = VariableLengthIntegerHelper.GetInteger(payload, out var consumed, out var examinded);
-                if (id == -1)
-                {
-                    break;
-                }
-
-                payload = payload.Slice(consumed);
-
-                var value = VariableLengthIntegerHelper.GetInteger(payload, out consumed, out examinded);
-                if (id == -1)
-                {
-                    break;
-                }
-
-                payload = payload.Slice(consumed);
-                ProcessSetting(id, value);
+                break;
             }
 
-            return default;
-        }
-
-        private void ProcessSetting(long id, long value)
-        {
-            // These are client settings, for outbound traffic.
-            switch (id)
+            if (!VariableLengthIntegerHelper.TryGetInteger(payload.Slice(consumed), out consumed, out var value))
             {
-                case (long)Http3SettingType.QPackMaxTableCapacity:
-                    _http3Connection.ApplyMaxTableCapacity(value);
-                    break;
-                case (long)Http3SettingType.MaxHeaderListSize:
-                    _http3Connection.ApplyMaxHeaderListSize(value);
-                    break;
-                case (long)Http3SettingType.QPackBlockedStreams:
-                    _http3Connection.ApplyBlockedStream(value);
-                    break;
-                default:
-                    // Ignore all unknown settings.
-                    break;
-            }
-        }
-
-        private ValueTask ProcessGoAwayFrameAsync(ReadOnlySequence<byte> payload)
-        {
-             throw new Http3ConnectionException("HTTP_FRAME_UNEXPECTED");
-        }
-
-        private ValueTask ProcessCancelPushFrameAsync()
-        {
-            if (!_haveReceivedSettingsFrame)
-            {
-                throw new Http3ConnectionException("HTTP_FRAME_UNEXPECTED");
+                // Reset consumed to very start even though we successfully read 1 varint. It's because we want to keep the id for when we have the value as well.
+                consumed = payload.Start;
+                break;
             }
 
-            return default;
+            payload = payload.Slice(consumed);
+            ProcessSetting(id, value);
         }
 
-        private ValueTask ProcessMaxPushIdFrameAsync()
+        return default;
+    }
+
+    private void ProcessSetting(long id, long value)
+    {
+        // These are client settings, for outbound traffic.
+        switch (id)
         {
-            if (!_haveReceivedSettingsFrame)
-            {
-                throw new Http3ConnectionException("HTTP_FRAME_UNEXPECTED");
-            }
-
-            return default;
+            case 0x0:
+            case 0x2:
+            case 0x3:
+            case 0x4:
+            case 0x5:
+                // HTTP/2 settings are reserved.
+                // https://quicwg.org/base-drafts/draft-ietf-quic-http.html#section-7.2.4.1-5
+                var message = CoreStrings.FormatHttp3ErrorControlStreamReservedSetting("0x" + id.ToString("X", CultureInfo.InvariantCulture));
+                throw new Http3ConnectionErrorException(message, Http3ErrorCode.SettingsError, ConnectionEndReason.InvalidSettings);
+            case (long)Http3SettingType.QPackMaxTableCapacity:
+            case (long)Http3SettingType.MaxFieldSectionSize:
+            case (long)Http3SettingType.QPackBlockedStreams:
+            case (long)Http3SettingType.EnableWebTransport:
+            case (long)Http3SettingType.H3Datagram:
+                _context.StreamLifetimeHandler.OnInboundControlStreamSetting((Http3SettingType)id, value);
+                break;
+            default:
+                // Ignore all unknown settings.
+                // https://quicwg.org/base-drafts/draft-ietf-quic-http.html#section-7.2.4
+                break;
         }
+    }
 
-        private ValueTask ProcessUnknownFrameAsync()
+    private ValueTask ProcessGoAwayFrameAsync(bool isContinuedFrame, Http3RawFrame incomingFrame, ReadOnlySequence<byte> payload, out SequencePosition consumed)
+    {
+        // https://www.rfc-editor.org/rfc/rfc9114.html#name-goaway
+
+        // We've already triggered RequestClose since isContinuedFrame is only true
+        // after we've already parsed the frame type and called the processing function at least once.
+        if (!isContinuedFrame)
         {
-            if (!_haveReceivedSettingsFrame)
-            {
-                throw new Http3ConnectionException("HTTP_FRAME_UNEXPECTED");
-            }
+            EnsureSettingsFrame(Http3FrameType.GoAway);
 
-            return default;
+            // StopProcessingNextRequest must be called before RequestClose to ensure it's considered client initiated.
+            _context.Connection.StopProcessingNextRequest(serverInitiated: false, ConnectionEndReason.ClientGoAway);
+            _context.ConnectionContext.Features.Get<IConnectionLifetimeNotificationFeature>()?.RequestClose();
         }
 
-        public void StopProcessingNextRequest()
-            => StopProcessingNextRequest(serverInitiated: true);
+        // PUSH is not implemented but we still want to parse the frame to do error checking
+        ParseVarIntWithFrameLengthValidation(incomingFrame, payload, out consumed);
 
-        public void StopProcessingNextRequest(bool serverInitiated)
+        // TODO: Double check the connection remains open.
+        return default;
+    }
+
+    private ValueTask ProcessCancelPushFrameAsync(Http3RawFrame incomingFrame, ReadOnlySequence<byte> payload, out SequencePosition consumed)
+    {
+        // https://www.rfc-editor.org/rfc/rfc9114.html#section-7.2.3
+
+        EnsureSettingsFrame(Http3FrameType.CancelPush);
+
+        // PUSH is not implemented but we still want to parse the frame to do error checking
+        ParseVarIntWithFrameLengthValidation(incomingFrame, payload, out consumed);
+
+        return default;
+    }
+
+    private ValueTask ProcessMaxPushIdFrameAsync(Http3RawFrame incomingFrame, ReadOnlySequence<byte> payload, out SequencePosition consumed)
+    {
+        // https://www.rfc-editor.org/rfc/rfc9114.html#section-7.2.7
+
+        EnsureSettingsFrame(Http3FrameType.MaxPushId);
+
+        // PUSH is not implemented but we still want to parse the frame to do error checking
+        ParseVarIntWithFrameLengthValidation(incomingFrame, payload, out consumed);
+
+        return default;
+    }
+
+    private ValueTask ProcessUnknownFrameAsync(Http3FrameType frameType)
+    {
+        EnsureSettingsFrame(frameType);
+
+        // https://quicwg.org/base-drafts/draft-ietf-quic-http.html#section-9
+        // Unknown frames must be explicitly ignored.
+        return default;
+    }
+
+    // Used for frame types that aren't (fully) implemented yet and contain a single var int as part of their framing. (CancelPush, MaxPushId, GoAway)
+    // We want to throw an error if the length field of the frame is larger than the spec defined format of the frame.
+    private static void ParseVarIntWithFrameLengthValidation(Http3RawFrame incomingFrame, ReadOnlySequence<byte> payload, out SequencePosition consumed)
+    {
+        if (!VariableLengthIntegerHelper.TryGetInteger(payload, out consumed, out _))
         {
-            var initiator = serverInitiated ? GracefulCloseInitiator.Server : GracefulCloseInitiator.Client;
-
-            if (Interlocked.CompareExchange(ref _gracefulCloseInitiator, initiator, GracefulCloseInitiator.None) == GracefulCloseInitiator.None)
-            {
-                Input.CancelPendingRead();
-            }
+            return;
         }
 
-        /// <summary>
-        /// Used to kick off the request processing loop by derived classes.
-        /// </summary>
-        public abstract void Execute();
-
-        private static class GracefulCloseInitiator
+        if (incomingFrame.RemainingLength > payload.Slice(0, consumed).Length)
         {
-            public const int None = 0;
-            public const int Server = 1;
-            public const int Client = 2;
+            // https://www.rfc-editor.org/rfc/rfc9114.html#section-10.8
+            // An implementation MUST ensure that the length of a frame exactly matches the length of the fields it contains.
+            throw new Http3ConnectionErrorException(CoreStrings.FormatHttp3ControlStreamFrameTooLarge(Http3Formatting.ToFormattedType(incomingFrame.Type)), Http3ErrorCode.FrameError, ConnectionEndReason.InvalidFrameLength);
         }
+    }
+
+    private void EnsureSettingsFrame(Http3FrameType frameType)
+    {
+        if (!_haveReceivedSettingsFrame)
+        {
+            var message = CoreStrings.FormatHttp3ErrorControlStreamFrameReceivedBeforeSettings(Http3Formatting.ToFormattedType(frameType));
+            throw new Http3ConnectionErrorException(message, Http3ErrorCode.MissingSettings, ConnectionEndReason.InvalidSettings);
+        }
+    }
+
+    /// <summary>
+    /// Used to kick off the request processing loop by derived classes.
+    /// </summary>
+    public abstract void Execute();
+
+    private static class GracefulCloseInitiator
+    {
+        public const int None = 0;
+        public const int Server = 1;
+        public const int Client = 2;
     }
 }

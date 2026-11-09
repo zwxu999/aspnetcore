@@ -1,44 +1,63 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Net;
-using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Http.Features;
-using Microsoft.AspNetCore.Server.Kestrel.Transport.Experimental.Quic.Internal;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Quic.Internal;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Experimental.Quic
+namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Quic;
+
+/// <summary>
+/// A factory for QUIC based connections.
+/// </summary>
+internal sealed class QuicTransportFactory : IMultiplexedConnectionListenerFactory, IConnectionListenerFactorySelector
 {
-    public class QuicTransportFactory : IMultiplexedConnectionListenerFactory
+    private readonly ILogger _log;
+    private readonly QuicTransportOptions _options;
+
+    public QuicTransportFactory(ILoggerFactory loggerFactory, IOptions<QuicTransportOptions> options)
     {
-        private QuicTrace _log;
-        private QuicTransportOptions _options;
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
 
-        public QuicTransportFactory(ILoggerFactory loggerFactory, IOptions<QuicTransportOptions> options)
+        var logger = loggerFactory.CreateLogger("Microsoft.AspNetCore.Server.Kestrel.Transport.Quic");
+        _log = logger;
+        _options = options.Value;
+    }
+
+    /// <summary>
+    /// Binds an endpoint to be used for QUIC connections.
+    /// </summary>
+    /// <param name="endpoint">The endpoint to bind to.</param>
+    /// <param name="features">Additional features to be used to create the listener.</param>
+    /// <param name="cancellationToken">To cancel the </param>
+    /// <returns>A </returns>
+    public async ValueTask<IMultiplexedConnectionListener> BindAsync(EndPoint endpoint, IFeatureCollection? features = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+
+        var tlsConnectionOptions = features?.Get<TlsConnectionCallbackOptions>();
+
+        if (tlsConnectionOptions == null)
         {
-            if (options == null)
-            {
-                throw new ArgumentNullException(nameof(options));
-            }
-
-            if (loggerFactory == null)
-            {
-                throw new ArgumentNullException(nameof(loggerFactory));
-            }
-
-            var logger = loggerFactory.CreateLogger("Microsoft.AspNetCore.Server.Kestrel.Transport.MsQuic");
-            _log = new QuicTrace(logger);
-            _options = options.Value;
+            throw new InvalidOperationException("Couldn't find HTTPS configuration for QUIC transport.");
+        }
+        if (tlsConnectionOptions.ApplicationProtocols == null || tlsConnectionOptions.ApplicationProtocols.Count == 0)
+        {
+            throw new InvalidOperationException("No application protocols specified for QUIC transport.");
         }
 
-        public  ValueTask<IMultiplexedConnectionListener> BindAsync(EndPoint endpoint, IFeatureCollection features = null, CancellationToken cancellationToken = default)
-        {
-            var transport = new QuicConnectionListener(_options, _log, endpoint);
-            return new ValueTask<IMultiplexedConnectionListener>(transport);
-        }
+        var transport = new QuicConnectionListener(_options, _log, endpoint, tlsConnectionOptions);
+        await transport.CreateListenerAsync();
+
+        return transport;
+    }
+
+    public bool CanBind(EndPoint endpoint)
+    {
+        return endpoint is IPEndPoint;
     }
 }

@@ -1,33 +1,30 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using Microsoft.AspNetCore.Shared;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
-namespace Microsoft.Extensions.DependencyInjection
+namespace Microsoft.Extensions.DependencyInjection;
+
+internal sealed class HealthChecksBuilder : IHealthChecksBuilder
 {
-    internal class HealthChecksBuilder : IHealthChecksBuilder
+    public HealthChecksBuilder(IServiceCollection services)
     {
-        public HealthChecksBuilder(IServiceCollection services)
+        Services = services;
+    }
+
+    public IServiceCollection Services { get; }
+
+    public IHealthChecksBuilder Add(HealthCheckRegistration registration)
+    {
+        ArgumentNullThrowHelper.ThrowIfNull(registration);
+
+        Services.Configure<HealthCheckServiceOptions>(options =>
         {
-            Services = services;
-        }
+            options.Registrations.Add(registration);
+        });
 
-        public IServiceCollection Services { get; }
-        
-        public IHealthChecksBuilder Add(HealthCheckRegistration registration)
-        {
-            if (registration == null)
-            {
-                throw new ArgumentNullException(nameof(registration));
-            }
-
-            Services.Configure<HealthCheckServiceOptions>(options =>
-            {
-                options.Registrations.Add(registration);
-            });
-
-            return this;
-        }
+        return this;
     }
 }

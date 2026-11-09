@@ -12,7 +12,6 @@ class PER_CPU
 public:
 
     template<typename FunctionInitializer>
-    inline
     static
     HRESULT
     Create(
@@ -20,29 +19,23 @@ public:
         __deref_out PER_CPU<T> **   ppInstance
     );
 
-    inline
     T *
     GetLocal(
-        VOID
     );
 
     template<typename FunctionForEach>
-    inline
     VOID
     ForEach(
         FunctionForEach Function
     );
 
-    inline
     VOID
     Dispose(
-        VOID
     );
 
 private:
 
     PER_CPU(
-        VOID
     )
     {
         //
@@ -52,7 +45,6 @@ private:
     }
 
     ~PER_CPU(
-        VOID
     )
     {
         //
@@ -91,7 +83,6 @@ private:
 
 template<typename T>
 template<typename FunctionInitializer>
-inline
 // static
 HRESULT
 PER_CPU<T>::Create(
@@ -103,7 +94,7 @@ PER_CPU<T>::Create(
     DWORD           CacheLineSize = 0;
     DWORD           ObjectCacheLineSize = 0;
     DWORD           NumberOfProcessors = 0;
-    PER_CPU<T> *    pInstance = NULL;
+    PER_CPU<T> *    pInstance = nullptr;
 
     hr = GetProcessorInformation(&CacheLineSize,
                                  &NumberOfProcessors);
@@ -124,20 +115,23 @@ PER_CPU<T>::Create(
         ObjectCacheLineSize = CacheLineSize;
     }
 
-    //
-    // Calculate the size of the PER_CPU<T> object, including the array.
-    // The first cache line is for the member variables and the array
-    // starts in the next cache line.
-    //
-    SIZE_T Size = CacheLineSize + NumberOfProcessors * ObjectCacheLineSize;
-
-    pInstance = (PER_CPU<T>*) _aligned_malloc(Size, CacheLineSize);
-    if (pInstance == NULL)
     {
-        hr = E_OUTOFMEMORY;
-        goto Finished;
+        //
+        // Calculate the size of the PER_CPU<T> object, including the array.
+        // The first cache line is for the member variables and the array
+        // starts in the next cache line.
+        //
+        SIZE_T Size = CacheLineSize + NumberOfProcessors * ObjectCacheLineSize;
+
+        pInstance = (PER_CPU<T>*) _aligned_malloc(Size, CacheLineSize);
+        if (pInstance == nullptr)
+        {
+            hr = E_OUTOFMEMORY;
+            goto Finished;
+        }
+
+        ZeroMemory(pInstance, Size);
     }
-    ZeroMemory(pInstance, Size);
 
     //
     // The array start in the 2nd cache line.
@@ -156,27 +150,25 @@ PER_CPU<T>::Create(
     }
 
     *ppInstance = pInstance;
-    pInstance = NULL;
+    pInstance = nullptr;
 
 Finished:
 
-    if (pInstance != NULL)
+    if (pInstance != nullptr)
     {
         //
         // Free the instance without disposing it.
         //
         pInstance->Dispose();
-        pInstance = NULL;
+        pInstance = nullptr;
     }
 
     return hr;
 }
 
 template<typename T>
-inline
 T *
 PER_CPU<T>::GetLocal(
-    VOID
 )
 {
     // Use GetCurrentProcessorNumber (up to 64 logical processors) instead of
@@ -193,7 +185,6 @@ PER_CPU<T>::GetLocal(
 }
 
 template<typename T>
-inline
 T *
 PER_CPU<T>::GetObject(
     DWORD Index
@@ -204,12 +195,12 @@ PER_CPU<T>::GetObject(
 
 template<typename T>
 template<typename FunctionForEach>
-inline
 VOID
 PER_CPU<T>::ForEach(
     FunctionForEach Function
 )
 {
+    // codeql[SM02323] - Loop is counter-bounded: Index starts at 0, increments monotonically, and exits at m_VariablesCount.
     for(DWORD Index = 0; Index < m_VariablesCount; ++Index)
     {
         T * pObject = GetObject(Index);
@@ -220,7 +211,6 @@ PER_CPU<T>::ForEach(
 template<typename T>
 VOID
 PER_CPU<T>::Dispose(
-    VOID
 )
 {
      _aligned_free(this);
@@ -228,7 +218,6 @@ PER_CPU<T>::Dispose(
 
 template<typename T>
 template<typename FunctionInitializer>
-inline
 HRESULT
 PER_CPU<T>::Initialize(
     FunctionInitializer Initializer,

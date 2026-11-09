@@ -1,11 +1,12 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 #pragma once
 
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
 #include "InProcessOptions.h"
+#include "AppOfflineTrackingApplication.h"
 
 class MockProperty : public IAppHostProperty
 {
@@ -185,6 +186,26 @@ public:
         CreateConfig()
     {
         return new MockInProcessOptions;
+    }
+};
+
+class MockAppOfflineTrackingApplication : public AppOfflineTrackingApplication
+{
+public:
+    MockAppOfflineTrackingApplication(const IHttpApplication& application)
+        : AppOfflineTrackingApplication(application)
+    {
+    }
+
+    VOID StopInternal(bool fServerInitiated) override {}
+    VOID OnAppOffline() override {}
+
+    HRESULT CreateHandler(
+        _In_ IHttpContext *pHttpContext,
+        _Outptr_opt_ IREQUEST_HANDLER **pRequestHandler) override
+    {
+        *pRequestHandler = nullptr;
+        return E_NOTIMPL;
     }
 };
 

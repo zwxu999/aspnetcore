@@ -133,6 +133,23 @@ std::wstring Environment::GetDllDirectoryValue()
     return expandedStr;
 }
 
+ProcessorArchitecture Environment::GetCurrentProcessArchitecture()
+{
+    // Use compile-time detection - we know which architectures we support
+    // and this is the most reliable and efficient approach. IsWow64Process2
+    // doesn't show the correct architecture when running under x64 emulation
+    // on ARM64.
+#if defined(_M_ARM64)
+    return ProcessorArchitecture::ARM64;
+#elif defined(_M_AMD64)
+    return ProcessorArchitecture::AMD64;
+#elif defined(_M_IX86)
+    return ProcessorArchitecture::x86;
+#else
+    static_assert(false, "Unknown target architecture");
+#endif
+}
+
 bool Environment::IsRunning64BitProcess()
 {
     // Check the bitness of the currently running process
@@ -150,4 +167,94 @@ bool Environment::IsRunning64BitProcess()
     SYSTEM_INFO systemInfo;
     GetNativeSystemInfo(&systemInfo);
     return systemInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64;
+}
+
+HRESULT Environment::CopyToDirectory(const std::wstring& source, const std::filesystem::path& destination, bool cleanDest, const std::filesystem::path& directoryToIgnore, int& copiedFileCount)
+{
+    if (cleanDest && std::filesystem::exists(destination))
+    {
+        std::filesystem::remove_all(destination);
+    }
+
+    Environment::CopyToDirectoryInner(source, destination, directoryToIgnore, copiedFileCount);
+    return S_OK;
+}
+
+void Environment::CopyToDirectoryInner(const std::filesystem::path& source, const std::filesystem::path& destination, const std::filesystem::path& directoryToIgnore, int& copiedFileCount)
+{
+    auto destinationDirEntry = std::filesystem::directory_entry(destination);
+    if (!destinationDirEntry.exists())
+    {
+        CreateDirectory(destination.wstring().c_str(), nullptr);
+    }
+
+    for (auto& path : std::filesystem::directory_iterator(source))
+    {
+        if (path.is_regular_file())
+        {
+            auto sourceFile = path.path().filename();
+            auto destinationPath = (destination / sourceFile);
+
+            if (std::filesystem::directory_entry(destinationPath).exists())
+            {
+                auto sourceFileTime = std::filesystem::last_write_time(path);
+                auto destinationFileTime = std::filesystem::last_write_time(destinationPath);
+                if (sourceFileTime <= destinationFileTime) // file write time is the same
+                {
+                    continue;
+                }
+            }
+
+            copiedFileCount++;
+            CopyFile(path.path().wstring().c_str(), destinationPath.wstring().c_str(), FALSE);
+        }
+        else if (path.is_directory())
+        {
+            auto sourceInnerDirectory = path.path();
+
+            if (sourceInnerDirectory.wstring().rfind(directoryToIgnore, 0) != 0)
+            {
+                CopyToDirectoryInner(path.path(), destination / path.path().filename(), directoryToIgnore, copiedFileCount);
+            }
+        }
+    }
+}
+
+bool Environment::CheckUpToDate(const std::wstring& source, const std::filesystem::path& destination, const std::wstring& extension, const std::filesystem::path& directoryToIgnore)
+{
+    for (auto& path : std::filesystem::directory_iterator(source))
+    {
+        if (path.is_regular_file()
+            && path.path().has_extension()
+            && path.path().filename().extension().wstring() == extension)
+        {
+            auto sourceFile = path.path().filename();
+            auto destinationPath = (destination / sourceFile);
+
+            // Only compare timestamps if destination exists
+            if (std::filesystem::directory_entry(destinationPath).exists())
+            {
+                auto originalFileTime = std::filesystem::last_write_time(path);
+                auto destFileTime = std::filesystem::last_write_time(destinationPath);
+                if (originalFileTime > destFileTime)
+                {
+                    return false;
+                }
+            }
+        }
+        else if (path.is_directory())
+        {
+            auto sourceInnerDirectory = path.path();
+            // Use prefix match to skip the shadow copy directory and its subdirectories
+            if (sourceInnerDirectory.wstring().rfind(directoryToIgnore, 0) != 0)
+            {
+                // Propagate result from subdirectories
+                if (!CheckUpToDate(/* source */ path.path(), /* destination */ destination / path.path().filename(), extension, directoryToIgnore))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
 }

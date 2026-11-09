@@ -1,293 +1,314 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System.Collections.Generic;
-using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Primitives;
 using Microsoft.Net.Http.Headers;
 using Moq;
-using Xunit;
 
-namespace Microsoft.AspNetCore.Mvc.Formatters
+namespace Microsoft.AspNetCore.Mvc.Formatters;
+
+public class TextOutputFormatterTests
 {
-    public class TextOutputFormatterTests
+    public static IEnumerable<object[]> SelectResponseCharacterEncodingData
     {
-        public static IEnumerable<object[]> SelectResponseCharacterEncodingData
+        get
         {
-            get
+            // string acceptEncodings, string requestEncoding, string[] supportedEncodings, string expectedEncoding
+            yield return new object[] { "", new string[] { "utf-8", "utf-16" }, "utf-8" };
+
+            yield return new object[] { "utf-8", new string[] { "utf-8", "utf-16" }, "utf-8" };
+            yield return new object[] { "utf-16", new string[] { "utf-8", "utf-16" }, "utf-16" };
+            yield return new object[] { "utf-16; q=0.5", new string[] { "utf-8", "utf-16" }, "utf-16" };
+
+            yield return new object[] { "utf-8; q=0.0", new string[] { "utf-8", "utf-16" }, "utf-8" };
+            yield return new object[] { "utf-8; q=0.0, utf-16; q=0.0", new string[] { "utf-8", "utf-16" }, "utf-8" };
+
+            yield return new object[] { "*; q=0.0", new string[] { "utf-8", "utf-16" }, "utf-8" };
+
+            // Weighted values are considered in descending quality order.
+            yield return new object[] { "utf-8; q=0.5, utf-16; q=0.8", new string[] { "utf-8", "utf-16" }, "utf-16" };
+            yield return new object[] { "utf-16; q=0.8, utf-8; q=0.5", new string[] { "utf-8", "utf-16" }, "utf-16" };
+
+            // An entry with q=0 is excluded when sorting occurs.
+            yield return new object[] { "utf-8; q=0.0, utf-16; q=0.5", new string[] { "utf-8", "utf-16" }, "utf-16" };
+
+            // A concrete charset is preferred over a wildcard with the same quality.
+            yield return new object[] { "*; q=0.8, utf-16; q=0.8", new string[] { "utf-8", "utf-16" }, "utf-16" };
+
+            // Wildcards still match a supported encoding.
+            yield return new object[] { "*; q=0.5", new string[] { "utf-8", "utf-16" }, "utf-8" };
+            yield return new object[] { "utf-32; q=0.3, *; q=0.5", new string[] { "utf-8", "utf-16" }, "utf-8" };
+
+            // Equal-quality concrete charsets preserve the existing observable selection behavior.
+            yield return new object[] { "utf-8; q=0.5, utf-16; q=0.5", new string[] { "utf-8", "utf-16" }, "utf-16" };
+
+            // Large collections of weighted values produce the same selected encoding as before.
+            yield return new object[]
             {
-                // string acceptEncodings, string requestEncoding, string[] supportedEncodings, string expectedEncoding
-                yield return new object[] { "", new string[] { "utf-8", "utf-16" }, "utf-8" };
-
-                yield return new object[] { "utf-8", new string[] { "utf-8", "utf-16" }, "utf-8" };
-                yield return new object[] { "utf-16", new string[] { "utf-8", "utf-16" }, "utf-16" };
-                yield return new object[] { "utf-16; q=0.5", new string[] { "utf-8", "utf-16" }, "utf-16" };
-
-                yield return new object[] { "utf-8; q=0.0", new string[] { "utf-8", "utf-16" }, "utf-8" };
-                yield return new object[] { "utf-8; q=0.0, utf-16; q=0.0", new string[] { "utf-8", "utf-16" }, "utf-8" };
-
-                yield return new object[] { "*; q=0.0", new string[] { "utf-8", "utf-16" }, "utf-8" };
-            }
-        }
-
-        [Theory]
-        [MemberData(nameof(SelectResponseCharacterEncodingData))]
-        public void SelectResponseCharacterEncoding_SelectsEncoding(
-            string acceptCharsetHeaders,
-            string[] supportedEncodings,
-            string expectedEncoding)
-        {
-            // Arrange
-            var httpContext = new Mock<HttpContext>();
-            var httpRequest = new DefaultHttpContext().Request;
-            httpRequest.Headers[HeaderNames.AcceptCharset] = acceptCharsetHeaders;
-            httpRequest.Headers[HeaderNames.Accept] = "application/acceptCharset";
-            httpContext.SetupGet(o => o.Request).Returns(httpRequest);
-
-            var formatter = new TestOutputFormatter();
-            foreach (string supportedEncoding in supportedEncodings)
-            {
-                formatter.SupportedEncodings.Add(Encoding.GetEncoding(supportedEncoding));
-            }
-
-            var context = new OutputFormatterWriteContext(
-                httpContext.Object,
-                new TestHttpResponseStreamWriterFactory().CreateWriter,
-                typeof(string),
-                "someValue")
-            {
-                ContentType = new StringSegment(httpRequest.Headers[HeaderNames.Accept]),
+                "utf-32; q=0.1, us-ascii; q=0.2, iso-8859-1; q=0.3, utf-16; q=0.4, utf-8; q=0.9",
+                new string[] { "utf-8", "utf-16" },
+                "utf-8"
             };
+        }
+    }
 
-            // Act
-            var actualEncoding = formatter.SelectCharacterEncoding(context);
+    [Theory]
+    [MemberData(nameof(SelectResponseCharacterEncodingData))]
+    public void SelectResponseCharacterEncoding_SelectsEncoding(
+        string acceptCharsetHeaders,
+        string[] supportedEncodings,
+        string expectedEncoding)
+    {
+        // Arrange
+        var httpContext = new Mock<HttpContext>();
+        var httpRequest = new DefaultHttpContext().Request;
+        httpRequest.Headers.AcceptCharset = acceptCharsetHeaders;
+        httpRequest.Headers.Accept = "application/acceptCharset";
+        httpContext.SetupGet(o => o.Request).Returns(httpRequest);
 
-            // Assert
-            Assert.Equal(Encoding.GetEncoding(expectedEncoding), actualEncoding);
+        var formatter = new TestOutputFormatter();
+        foreach (string supportedEncoding in supportedEncodings)
+        {
+            formatter.SupportedEncodings.Add(Encoding.GetEncoding(supportedEncoding));
         }
 
-        [Theory]
-        [InlineData("application/json; charset=utf-16", "application/json; charset=utf-32")]
-        [InlineData("application/json; charset=utf-16; format=indent", "application/json; charset=utf-32; format=indent")]
-        public void WriteResponse_OverridesCharset_IfDifferentFromContentTypeCharset(
-            string contentType,
-            string expectedContentType)
+        var context = new OutputFormatterWriteContext(
+            httpContext.Object,
+            new TestHttpResponseStreamWriterFactory().CreateWriter,
+            typeof(string),
+            "someValue")
         {
-            // Arrange
-            var formatter = new OverrideEncodingFormatter(Encoding.UTF32);
+            ContentType = new StringSegment(httpRequest.Headers.Accept),
+        };
 
-            var formatterContext = new OutputFormatterWriteContext(
-                new DefaultHttpContext(),
-                new TestHttpResponseStreamWriterFactory().CreateWriter,
-                objectType: null,
-                @object: null)
-            {
-                ContentType = new StringSegment(contentType),
-            };
+        // Act
+        var actualEncoding = formatter.SelectCharacterEncoding(context);
 
-            // Act
-            formatter.WriteAsync(formatterContext);
+        // Assert
+        Assert.Equal(Encoding.GetEncoding(expectedEncoding), actualEncoding);
+    }
 
-            // Assert
-            Assert.Equal(new StringSegment(expectedContentType), formatterContext.ContentType);
+    [Theory]
+    [InlineData("application/json; charset=utf-16", "application/json; charset=utf-32")]
+    [InlineData("application/json; charset=utf-16; format=indent", "application/json; charset=utf-32; format=indent")]
+    public void WriteResponse_OverridesCharset_IfDifferentFromContentTypeCharset(
+        string contentType,
+        string expectedContentType)
+    {
+        // Arrange
+        var formatter = new OverrideEncodingFormatter(Encoding.UTF32);
+
+        var formatterContext = new OutputFormatterWriteContext(
+            new DefaultHttpContext(),
+            new TestHttpResponseStreamWriterFactory().CreateWriter,
+            objectType: null,
+            @object: null)
+        {
+            ContentType = new StringSegment(contentType),
+        };
+
+        // Act
+        formatter.WriteAsync(formatterContext);
+
+        // Assert
+        Assert.Equal(new StringSegment(expectedContentType), formatterContext.ContentType);
+    }
+
+    [Fact]
+    public void WriteResponse_GetMediaTypeWithCharsetReturnsMediaTypeFromCache_IfEncodingIsUtf8()
+    {
+        // Arrange
+        var formatter = new TestOutputFormatter();
+
+        var formatterContext = new OutputFormatterWriteContext(
+            new DefaultHttpContext(),
+            new TestHttpResponseStreamWriterFactory().CreateWriter,
+            objectType: null,
+            @object: null)
+        {
+            ContentType = new StringSegment("application/json"),
+        };
+
+        formatter.SupportedMediaTypes.Add("application/json");
+        formatter.SupportedEncodings.Add(Encoding.UTF8);
+
+        // Act
+        formatter.WriteAsync(formatterContext);
+        var firstContentType = formatterContext.ContentType;
+
+        formatterContext.ContentType = new StringSegment("application/json");
+
+        formatter.WriteAsync(formatterContext);
+        var secondContentType = formatterContext.ContentType;
+
+        // Assert
+        Assert.Same(firstContentType.Buffer, secondContentType.Buffer);
+    }
+
+    [Fact]
+    public void WriteResponse_GetMediaTypeWithCharsetReplacesCharset_IfDifferentThanEncoding()
+    {
+        // Arrange
+        var formatter = new TestOutputFormatter();
+
+        var formatterContext = new OutputFormatterWriteContext(
+            new DefaultHttpContext(),
+            new TestHttpResponseStreamWriterFactory().CreateWriter,
+            objectType: null,
+            @object: null)
+        {
+            ContentType = new StringSegment("application/json; charset=utf-7"),
+        };
+
+        formatter.SupportedMediaTypes.Add("application/json");
+        formatter.SupportedEncodings.Add(Encoding.UTF8);
+
+        // Act
+        formatter.WriteAsync(formatterContext);
+
+        // Assert
+        Assert.Equal(new StringSegment("application/json; charset=utf-8"), formatterContext.ContentType);
+    }
+
+    [Fact]
+    public void WriteResponse_GetMediaTypeWithCharsetReturnsSameString_IfCharsetEqualToEncoding()
+    {
+        // Arrange
+        var formatter = new TestOutputFormatter();
+
+        var contentType = "application/json; charset=utf-16";
+        var formatterContext = new OutputFormatterWriteContext(
+            new DefaultHttpContext(),
+            new TestHttpResponseStreamWriterFactory().CreateWriter,
+            objectType: null,
+            @object: null)
+        {
+            ContentType = new StringSegment(contentType),
+        };
+
+        formatter.SupportedMediaTypes.Add("application/json");
+        formatter.SupportedEncodings.Add(Encoding.Unicode);
+
+        // Act
+        formatter.WriteAsync(formatterContext);
+
+        // Assert
+        Assert.Same(contentType, formatterContext.ContentType.Buffer);
+    }
+
+    [Fact]
+    public void WriteResponseContentHeaders_NoSupportedEncodings_NoEncodingIsSet()
+    {
+        // Arrange
+        var formatter = new TestOutputFormatter();
+
+        var testContentType = new StringSegment("text/json");
+
+        formatter.SupportedEncodings.Clear();
+        formatter.SupportedMediaTypes.Clear();
+        formatter.SupportedMediaTypes.Add(new MediaTypeHeaderValue("text/json"));
+
+        var context = new OutputFormatterWriteContext(
+            new DefaultHttpContext(),
+            new TestHttpResponseStreamWriterFactory().CreateWriter,
+            objectType: null,
+            @object: null)
+        {
+            ContentType = testContentType,
+        };
+
+        // Act
+        formatter.WriteResponseHeaders(context);
+
+        // Assert
+        Assert.Null(MediaTypeHeaderValue.Parse(context.ContentType.Value).Encoding);
+        Assert.Equal(testContentType, context.ContentType);
+
+        // If we had set an encoding, it would be part of the content type header
+        Assert.Equal(MediaTypeHeaderValue.Parse(testContentType.Value), context.HttpContext.Response.GetTypedHeaders().ContentType);
+    }
+
+    [Fact]
+    public async Task WriteAsync_ReturnsNotAcceptable_IfSelectCharacterEncodingReturnsNull()
+    {
+        // Arrange
+        var formatter = new OverrideEncodingFormatter(encoding: null);
+
+        var testContentType = new StringSegment("text/json");
+        formatter.SupportedMediaTypes.Add(new MediaTypeHeaderValue("text/json"));
+
+        var context = new OutputFormatterWriteContext(
+            new DefaultHttpContext() { RequestServices = new ServiceCollection().BuildServiceProvider() },
+            new TestHttpResponseStreamWriterFactory().CreateWriter,
+            objectType: null,
+            @object: null)
+        {
+            ContentType = testContentType,
+        };
+
+        // Act
+        await formatter.WriteAsync(context);
+
+        // Assert
+        Assert.Equal(StatusCodes.Status406NotAcceptable, context.HttpContext.Response.StatusCode);
+    }
+
+    [Fact]
+    public void GetAcceptCharsetHeaderValues_ReadsHeaderAndParsesValues()
+    {
+        // Arrange
+        const string expectedValue = "expected";
+
+        var formatter = new OverrideEncodingFormatter(encoding: null);
+        var context = new DefaultHttpContext();
+        context.Request.Headers.AcceptCharset = expectedValue;
+
+        var writerContext = new OutputFormatterWriteContext(
+            context,
+            new TestHttpResponseStreamWriterFactory().CreateWriter,
+            objectType: null,
+            @object: null);
+
+        // Act
+        var result = TextOutputFormatter.GetAcceptCharsetHeaderValues(writerContext);
+
+        //Assert
+        Assert.Equal(expectedValue, Assert.Single(result).Value.Value);
+    }
+
+    private class TestOutputFormatter : TextOutputFormatter
+    {
+        public TestOutputFormatter()
+        {
+            SupportedMediaTypes.Add("application/acceptCharset");
         }
 
-        [Fact]
-        public void WriteResponse_GetMediaTypeWithCharsetReturnsMediaTypeFromCache_IfEncodingIsUtf8()
+        public override Task WriteResponseBodyAsync(OutputFormatterWriteContext context, Encoding selectedEncoding)
         {
-            // Arrange
-            var formatter = new TestOutputFormatter();
+            return Task.FromResult(true);
+        }
+    }
 
-            var formatterContext = new OutputFormatterWriteContext(
-                new DefaultHttpContext(),
-                new TestHttpResponseStreamWriterFactory().CreateWriter,
-                objectType: null,
-                @object: null)
-            {
-                ContentType = new StringSegment("application/json"),
-            };
+    private class OverrideEncodingFormatter : TextOutputFormatter
+    {
+        private readonly Encoding _encoding;
 
-            formatter.SupportedMediaTypes.Add("application/json");
-            formatter.SupportedEncodings.Add(Encoding.UTF8);
-
-            // Act
-            formatter.WriteAsync(formatterContext);
-            var firstContentType = formatterContext.ContentType;
-
-            formatterContext.ContentType = new StringSegment("application/json");
-
-            formatter.WriteAsync(formatterContext);
-            var secondContentType = formatterContext.ContentType;
-
-            // Assert
-            Assert.Same(firstContentType.Buffer, secondContentType.Buffer);
+        public OverrideEncodingFormatter(Encoding encoding)
+        {
+            _encoding = encoding;
         }
 
-        [Fact]
-        public void WriteResponse_GetMediaTypeWithCharsetReplacesCharset_IfDifferentThanEncoding()
+        public override Encoding SelectCharacterEncoding(OutputFormatterWriteContext context)
         {
-            // Arrange
-            var formatter = new TestOutputFormatter();
-
-            var formatterContext = new OutputFormatterWriteContext(
-                new DefaultHttpContext(),
-                new TestHttpResponseStreamWriterFactory().CreateWriter,
-                objectType: null,
-                @object: null)
-            {
-                ContentType = new StringSegment("application/json; charset=utf-7"),
-            };
-
-            formatter.SupportedMediaTypes.Add("application/json");
-            formatter.SupportedEncodings.Add(Encoding.UTF8);
-
-            // Act
-            formatter.WriteAsync(formatterContext);
-
-            // Assert
-            Assert.Equal(new StringSegment("application/json; charset=utf-8"), formatterContext.ContentType);
+            return _encoding;
         }
 
-        [Fact]
-        public void WriteResponse_GetMediaTypeWithCharsetReturnsSameString_IfCharsetEqualToEncoding()
+        public override Task WriteResponseBodyAsync(OutputFormatterWriteContext context, Encoding selectedEncoding)
         {
-            // Arrange
-            var formatter = new TestOutputFormatter();
-
-            var contentType = "application/json; charset=utf-16";
-            var formatterContext = new OutputFormatterWriteContext(
-                new DefaultHttpContext(),
-                new TestHttpResponseStreamWriterFactory().CreateWriter,
-                objectType: null,
-                @object: null)
-            {
-                ContentType = new StringSegment(contentType),
-            };
-
-            formatter.SupportedMediaTypes.Add("application/json");
-            formatter.SupportedEncodings.Add(Encoding.Unicode);
-
-            // Act
-            formatter.WriteAsync(formatterContext);
-
-            // Assert
-            Assert.Same(contentType, formatterContext.ContentType.Buffer);
-        }
-
-        [Fact]
-        public void WriteResponseContentHeaders_NoSupportedEncodings_NoEncodingIsSet()
-        {
-            // Arrange
-            var formatter = new TestOutputFormatter();
-
-            var testContentType = new StringSegment("text/json");
-
-            formatter.SupportedEncodings.Clear();
-            formatter.SupportedMediaTypes.Clear();
-            formatter.SupportedMediaTypes.Add(new MediaTypeHeaderValue("text/json"));
-
-            var context = new OutputFormatterWriteContext(
-                new DefaultHttpContext(),
-                new TestHttpResponseStreamWriterFactory().CreateWriter,
-                objectType: null,
-                @object: null)
-            {
-                ContentType = testContentType,
-            };
-
-            // Act
-            formatter.WriteResponseHeaders(context);
-
-            // Assert
-            Assert.Null(MediaTypeHeaderValue.Parse(context.ContentType.Value).Encoding);
-            Assert.Equal(testContentType, context.ContentType);
-
-            // If we had set an encoding, it would be part of the content type header
-            Assert.Equal(MediaTypeHeaderValue.Parse(testContentType.Value), context.HttpContext.Response.GetTypedHeaders().ContentType);
-        }
-
-        [Fact]
-        public async Task WriteAsync_ReturnsNotAcceptable_IfSelectCharacterEncodingReturnsNull()
-        {
-            // Arrange
-            var formatter = new OverrideEncodingFormatter(encoding: null);
-
-            var testContentType = new StringSegment("text/json");
-            formatter.SupportedMediaTypes.Add(new MediaTypeHeaderValue("text/json"));
-
-            var context = new OutputFormatterWriteContext(
-                new DefaultHttpContext(),
-                new TestHttpResponseStreamWriterFactory().CreateWriter,
-                objectType: null,
-                @object: null)
-            {
-                ContentType = testContentType,
-            };
-
-            // Act
-            await formatter.WriteAsync(context);
-
-            // Assert
-            Assert.Equal(StatusCodes.Status406NotAcceptable, context.HttpContext.Response.StatusCode);
-        }
-
-        [Fact]
-        public void GetAcceptCharsetHeaderValues_ReadsHeaderAndParsesValues()
-        {
-            // Arrange
-            const string expectedValue = "expected";
-
-            var formatter = new OverrideEncodingFormatter(encoding: null);
-            var context = new DefaultHttpContext();
-            context.Request.Headers[HeaderNames.AcceptCharset] = expectedValue;
-
-            var writerContext = new OutputFormatterWriteContext(
-                context,
-                new TestHttpResponseStreamWriterFactory().CreateWriter,
-                objectType: null,
-                @object: null);
-
-            // Act
-            var result = TextOutputFormatter.GetAcceptCharsetHeaderValues(writerContext);
-
-            //Assert
-            Assert.Equal(expectedValue, Assert.Single(result).Value.Value);
-        }
-
-        private class TestOutputFormatter : TextOutputFormatter
-        {
-            public TestOutputFormatter()
-            {
-                SupportedMediaTypes.Add("application/acceptCharset");
-            }
-
-            public override Task WriteResponseBodyAsync(OutputFormatterWriteContext context, Encoding selectedEncoding)
-            {
-                return Task.FromResult(true);
-            }
-        }
-
-        private class OverrideEncodingFormatter : TextOutputFormatter
-        {
-            private readonly Encoding _encoding;
-
-            public OverrideEncodingFormatter(Encoding encoding)
-            {
-                _encoding = encoding;
-            }
-
-            public override Encoding SelectCharacterEncoding(OutputFormatterWriteContext context)
-            {
-                return _encoding;
-            }
-
-            public override Task WriteResponseBodyAsync(OutputFormatterWriteContext context, Encoding selectedEncoding)
-            {
-                return Task.FromResult(true);
-            }
+            return Task.FromResult(true);
         }
     }
 }

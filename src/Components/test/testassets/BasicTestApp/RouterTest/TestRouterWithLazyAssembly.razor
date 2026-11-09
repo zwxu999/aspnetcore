@@ -1,6 +1,6 @@
 ﻿@using Microsoft.AspNetCore.Components.Routing
 @using System.Reflection
-@using Microsoft.AspNetCore.Components.WebAssembly.Services 
+@using Microsoft.AspNetCore.Components.WebAssembly.Services
 
 @inject LazyAssemblyLoader lazyLoader
 
@@ -12,6 +12,7 @@
     </Navigating>
     <Found Context="routeData">
         <RouteView RouteData="@routeData" />
+        <FocusOnNavigate RouteData="@routeData" Selector="#lazy-page" />
     </Found>
     <NotFound>
         <LayoutView Layout="@typeof(RouterTestLayout)">
@@ -31,25 +32,24 @@
 
     private async Task LoadAssemblies(string uri)
     {
-        try
+        if (uri.EndsWith("WithLazyAssembly"))
         {
-            if (uri.EndsWith("WithLazyAssembly"))
-            {
-                Console.WriteLine($"Loading assemblies for WithLazyAssembly...");
-                var assemblies = await lazyLoader.LoadAssembliesAsync(new List<string>() { "Newtonsoft.Json.dll" });
-                lazyLoadedAssemblies.AddRange(assemblies);
-            }
-
-            if (uri.EndsWith("WithLazyLoadedRoutes"))
-            {
-                Console.WriteLine($"Loading assemblies for WithLazyLoadedRoutes...");
-                var assemblies = await lazyLoader.LoadAssembliesAsync(new List<string>() { "LazyTestContentPackage.dll" });
-                lazyLoadedAssemblies.AddRange(assemblies);
-            }
+            Console.WriteLine($"Loading assemblies for WithLazyAssembly...");
+            var assemblies = await lazyLoader.LoadAssembliesAsync(new List<string>() { "Newtonsoft.Json.wasm" });
+            lazyLoadedAssemblies.AddRange(assemblies);
         }
-        catch (Exception e)
+
+        if (uri.EndsWith("WithLazyLoadedRoutes"))
         {
-            Console.WriteLine($"Error when loading assemblies: {e}");
+            Console.WriteLine($"Loading assemblies for WithLazyLoadedRoutes...");
+            var assemblies = await lazyLoader.LoadAssembliesAsync(new List<string>() { "LazyTestContentPackage.wasm" });
+            lazyLoadedAssemblies.AddRange(assemblies);
+        }
+
+        if (uri.EndsWith("Other")) {
+            Console.WriteLine($"Loading assemblies for Other...");
+            var assemblies = await lazyLoader.LoadAssembliesAsync(new List<string>() { "DoesNotExist.wasm" });
+            lazyLoadedAssemblies.AddRange(assemblies);
         }
     }
 }

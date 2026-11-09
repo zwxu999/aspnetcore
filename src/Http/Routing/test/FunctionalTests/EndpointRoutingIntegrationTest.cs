@@ -1,240 +1,346 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Net;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Net.Http.Headers;
 
-namespace Microsoft.AspNetCore.Routing.FunctionalTests
+namespace Microsoft.AspNetCore.Routing.FunctionalTests;
+
+public class EndpointRoutingIntegrationTest
 {
-    public class EndpointRoutingIntegrationTest
+    private static readonly RequestDelegate TestDelegate = async context => await Task.Yield();
+    private static readonly string AuthErrorMessage = "Endpoint / contains authorization metadata, but a middleware was not found that supports authorization." +
+        Environment.NewLine +
+        "Configure your application startup by adding app.UseAuthorization() in the application startup code. " +
+        "If there are calls to app.UseRouting() and app.UseEndpoints(...), the call to app.UseAuthorization() must go between them.";
+
+    private static readonly string CORSErrorMessage = "Endpoint / contains CORS metadata, but a middleware was not found that supports CORS." +
+        Environment.NewLine +
+        "Configure your application startup by adding app.UseCors() in the application startup code. " +
+        "If there are calls to app.UseRouting() and app.UseEndpoints(...), the call to app.UseCors() must go between them.";
+
+    [Fact]
+    public async Task AuthorizationMiddleware_WhenNoAuthMetadataIsConfigured()
     {
-        private static readonly RequestDelegate TestDelegate = async context => await Task.Yield();
-        private static readonly string AuthErrorMessage = "Endpoint / contains authorization metadata, but a middleware was not found that supports authorization." +
-            Environment.NewLine +
-            "Configure your application startup by adding app.UseAuthorization() inside the call to Configure(..) in the application startup code. " +
-            "The call to app.UseAuthorization() must appear between app.UseRouting() and app.UseEndpoints(...).";
-
-        private static readonly string CORSErrorMessage = "Endpoint / contains CORS metadata, but a middleware was not found that supports CORS." +
-            Environment.NewLine +
-            "Configure your application startup by adding app.UseCors() inside the call to Configure(..) in the application startup code. " +
-            "The call to app.UseCors() must appear between app.UseRouting() and app.UseEndpoints(...).";
-
-        [Fact]
-        public async Task AuthorizationMiddleware_WhenNoAuthMetadataIsConfigured()
-        {
-            // Arrange
-            var builder = new WebHostBuilder();
-            builder.Configure(app =>
+        // Arrange
+        using var host = new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
             {
-                app.UseRouting();
-                app.UseAuthorization();
-                app.UseEndpoints(b => b.Map("/", TestDelegate));
+                webHostBuilder
+                    .Configure(app =>
+                    {
+                        app.UseRouting();
+                        app.UseAuthorization();
+                        app.UseEndpoints(b => b.Map("/", TestDelegate));
+                    })
+                    .UseTestServer();
             })
-           .ConfigureServices(services =>
-           {
-               services.AddAuthorization();
-               services.AddRouting();
-           });
-
-            using var server = new TestServer(builder);
-
-            var response = await server.CreateRequest("/").SendAsync("GET");
-
-            response.EnsureSuccessStatusCode();
-        }
-
-        [Fact]
-        public async Task AuthorizationMiddleware_WhenEndpointIsNotFound()
-        {
-            // Arrange
-            var builder = new WebHostBuilder();
-            builder.Configure(app =>
+            .ConfigureServices(services =>
             {
-                app.UseRouting();
-                app.UseAuthorization();
-                app.UseEndpoints(b => b.Map("/", TestDelegate));
+                services.AddAuthorization();
+                services.AddRouting();
             })
-           .ConfigureServices(services =>
-           {
-               services.AddAuthorization();
-               services.AddRouting();
-           });
+            .Build();
 
-            using var server = new TestServer(builder);
+        using var server = host.GetTestServer();
 
-            var response = await server.CreateRequest("/not-found").SendAsync("GET");
+        await host.StartAsync();
 
-            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-        }
+        var response = await server.CreateRequest("/").SendAsync("GET");
 
-        [Fact]
-        public async Task AuthorizationMiddleware_WithAuthorizedEndpoint()
-        {
-            // Arrange
-            var builder = new WebHostBuilder();
-            builder.Configure(app =>
+        response.EnsureSuccessStatusCode();
+    }
+
+    [Fact]
+    public async Task AuthorizationMiddleware_WhenEndpointIsNotFound()
+    {
+        // Arrange
+        using var host = new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
             {
-                app.UseRouting();
-                app.UseAuthorization();
-                app.UseEndpoints(b => b.Map("/", TestDelegate).RequireAuthorization());
+                webHostBuilder
+                    .Configure(app =>
+                    {
+                        app.UseRouting();
+                        app.UseAuthorization();
+                        app.UseEndpoints(b => b.Map("/", TestDelegate));
+                    })
+                    .UseTestServer();
             })
-           .ConfigureServices(services =>
-           {
-               services.AddAuthorization(options => options.DefaultPolicy = new AuthorizationPolicyBuilder().RequireAssertion(_ => true).Build());
-               services.AddRouting();
-           });
-
-            using var server = new TestServer(builder);
-
-            var response = await server.CreateRequest("/").SendAsync("GET");
-
-            response.EnsureSuccessStatusCode();
-        }
-
-        [Fact]
-        public async Task AuthorizationMiddleware_NotConfigured_Throws()
-        {
-            // Arrange
-            var builder = new WebHostBuilder();
-            builder.Configure(app =>
+            .ConfigureServices(services =>
             {
-                app.UseRouting();
-                app.UseEndpoints(b => b.Map("/", TestDelegate).RequireAuthorization());
-
+                services.AddAuthorization();
+                services.AddRouting();
             })
-           .ConfigureServices(services =>
-           {
-               services.AddAuthorization(options => options.DefaultPolicy = new AuthorizationPolicyBuilder().RequireAssertion(_ => true).Build());
-               services.AddRouting();
-           });
+            .Build();
 
-            using var server = new TestServer(builder);
+        using var server = host.GetTestServer();
 
-            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => server.CreateRequest("/").SendAsync("GET"));
-            Assert.Equal(AuthErrorMessage, ex.Message);
-        }
+        await host.StartAsync();
 
-        [Fact]
-        public async Task AuthorizationMiddleware_NotConfigured_WhenEndpointIsNotFound()
-        {
-            // Arrange
-            var builder = new WebHostBuilder();
-            builder.Configure(app =>
+        var response = await server.CreateRequest("/not-found").SendAsync("GET");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task AuthorizationMiddleware_WithAuthorizedEndpoint()
+    {
+        // Arrange
+        using var host = new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
             {
-                app.UseRouting();
-                app.UseEndpoints(b => b.Map("/", TestDelegate).RequireAuthorization());
+                webHostBuilder
+                    .Configure(app =>
+                    {
+                        app.UseRouting();
+                        app.UseAuthorization();
+                        app.UseEndpoints(b => b.Map("/", TestDelegate).RequireAuthorization());
+                    })
+                    .UseTestServer();
             })
-           .ConfigureServices(services =>
-           {
-               services.AddRouting();
-           });
-
-            using var server = new TestServer(builder);
-
-            var response = await server.CreateRequest("/not-found").SendAsync("GET");
-
-            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-        }
-
-        [Fact]
-        public async Task AuthorizationMiddleware_ConfiguredBeforeRouting_Throws()
-        {
-            // Arrange
-            var builder = new WebHostBuilder();
-            builder.Configure(app =>
+            .ConfigureServices(services =>
             {
-                app.UseAuthorization();
-                app.UseRouting();
-                app.UseEndpoints(b => b.Map("/", TestDelegate).RequireAuthorization());
+                services.AddAuthorization(options => options.DefaultPolicy = new AuthorizationPolicyBuilder().RequireAssertion(_ => true).Build());
+                services.AddRouting();
             })
-           .ConfigureServices(services =>
-           {
-               services.AddAuthorization(options => options.DefaultPolicy = new AuthorizationPolicyBuilder().RequireAssertion(_ => true).Build());
-               services.AddRouting();
-           });
+            .Build();
 
-            using var server = new TestServer(builder);
+        using var server = host.GetTestServer();
 
-            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => server.CreateRequest("/").SendAsync("GET"));
-            Assert.Equal(AuthErrorMessage, ex.Message);
-        }
+        await host.StartAsync();
 
-        [Fact]
-        public async Task AuthorizationMiddleware_ConfiguredAfterRouting_Throws()
-        {
-            // Arrange
-            var builder = new WebHostBuilder();
-            builder.Configure(app =>
+        var response = await server.CreateRequest("/").SendAsync("GET");
+
+        response.EnsureSuccessStatusCode();
+    }
+
+    [Fact]
+    public async Task AuthorizationMiddleware_NotConfigured_Throws()
+    {
+        // Arrange
+        using var host = new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
             {
-                app.UseRouting();
-                app.UseEndpoints(b => b.Map("/", TestDelegate).RequireAuthorization());
-                app.UseAuthorization();
+                webHostBuilder
+                    .Configure(app =>
+                    {
+                        app.UseRouting();
+                        app.UseEndpoints(b => b.Map("/", TestDelegate).RequireAuthorization());
+
+                    })
+                    .UseTestServer();
             })
-           .ConfigureServices(services =>
-           {
-               services.AddAuthorization(options => options.DefaultPolicy = new AuthorizationPolicyBuilder().RequireAssertion(_ => true).Build());
-               services.AddRouting();
-           });
-
-            using var server = new TestServer(builder);
-
-            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => server.CreateRequest("/").SendAsync("GET"));
-            Assert.Equal(AuthErrorMessage, ex.Message);
-        }
-
-        [Fact]
-        public async Task CorsMiddleware_WithCorsEndpoint()
-        {
-            // Arrange
-            var builder = new WebHostBuilder();
-            builder.Configure(app =>
+            .ConfigureServices(services =>
             {
-                app.UseRouting();
-                app.UseCors();
-                app.UseEndpoints(b => b.Map("/", TestDelegate).RequireCors(policy => policy.AllowAnyOrigin()));
+                services.AddAuthorization(options => options.DefaultPolicy = new AuthorizationPolicyBuilder().RequireAssertion(_ => true).Build());
+                services.AddRouting();
             })
-           .ConfigureServices(services =>
-           {
-               services.AddCors();
-               services.AddRouting();
-           });
+            .Build();
 
-            using var server = new TestServer(builder);
+        using var server = host.GetTestServer();
 
-            var response = await server.CreateRequest("/").SendAsync("PUT");
+        await host.StartAsync();
 
-            response.EnsureSuccessStatusCode();
-        }
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => server.CreateRequest("/").SendAsync("GET"));
+        Assert.Equal(AuthErrorMessage, ex.Message);
+    }
 
-        [Fact]
-        public async Task CorsMiddleware_ConfiguredBeforeRouting_Throws()
-        {
-            // Arrange
-            var builder = new WebHostBuilder();
-            builder.Configure(app =>
+    [Fact]
+    public async Task AuthorizationMiddleware_NotConfigured_WhenEndpointIsNotFound()
+    {
+        // Arrange
+        using var host = new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
             {
-                app.UseCors();
-                app.UseRouting();
-                app.UseEndpoints(b => b.Map("/", TestDelegate).RequireCors(policy => policy.AllowAnyOrigin()));
+                webHostBuilder
+                    .Configure(app =>
+                    {
+                        app.UseRouting();
+                        app.UseEndpoints(b => b.Map("/", TestDelegate).RequireAuthorization());
+                    })
+                    .UseTestServer();
             })
-           .ConfigureServices(services =>
-           {
-               services.AddCors();
-               services.AddRouting();
-           });
+            .ConfigureServices(services =>
+            {
+                services.AddRouting();
+            })
+            .Build();
 
-            using var server = new TestServer(builder);
+        using var server = host.GetTestServer();
 
-            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => server.CreateRequest("/").SendAsync("GET"));
-            Assert.Equal(CORSErrorMessage, ex.Message);
-        }
+        await host.StartAsync();
+
+        var response = await server.CreateRequest("/not-found").SendAsync("GET");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task AuthorizationMiddleware_ConfiguredBeforeRouting_Throws()
+    {
+        // Arrange
+        using var host = new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
+            {
+                webHostBuilder
+                    .Configure(app =>
+                    {
+                        app.UseAuthorization();
+                        app.UseRouting();
+                        app.UseEndpoints(b => b.Map("/", TestDelegate).RequireAuthorization());
+                    })
+                    .UseTestServer();
+            })
+            .ConfigureServices(services =>
+            {
+                services.AddAuthorization(options => options.DefaultPolicy = new AuthorizationPolicyBuilder().RequireAssertion(_ => true).Build());
+                services.AddRouting();
+            })
+            .Build();
+
+        using var server = host.GetTestServer();
+
+        await host.StartAsync();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => server.CreateRequest("/").SendAsync("GET"));
+        Assert.Equal(AuthErrorMessage, ex.Message);
+    }
+
+    [Fact]
+    public async Task AuthorizationMiddleware_ConfiguredAfterRouting_Throws()
+    {
+        // Arrange
+        using var host = new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
+            {
+                webHostBuilder
+                    .Configure(app =>
+                    {
+                        app.UseRouting();
+                        app.UseEndpoints(b => b.Map("/", TestDelegate).RequireAuthorization());
+                        app.UseAuthorization();
+                    })
+                    .UseTestServer();
+            })
+            .ConfigureServices(services =>
+            {
+                services.AddAuthorization(options => options.DefaultPolicy = new AuthorizationPolicyBuilder().RequireAssertion(_ => true).Build());
+                services.AddRouting();
+            })
+            .Build();
+
+        using var server = host.GetTestServer();
+
+        await host.StartAsync();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => server.CreateRequest("/").SendAsync("GET"));
+        Assert.Equal(AuthErrorMessage, ex.Message);
+    }
+
+    [Fact]
+    public async Task CorsMiddleware_WithCorsEndpoint()
+    {
+        // Arrange
+        using var host = new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
+            {
+                webHostBuilder
+                    .Configure(app =>
+                    {
+                        app.UseRouting();
+                        app.UseCors();
+                        app.UseEndpoints(b => b.Map("/", TestDelegate).RequireCors(policy => policy.AllowAnyOrigin()));
+                    })
+                    .UseTestServer();
+            })
+            .ConfigureServices(services =>
+            {
+                services.AddCors();
+                services.AddRouting();
+            })
+            .Build();
+
+        using var server = host.GetTestServer();
+
+        await host.StartAsync();
+
+        var response = await server.CreateRequest("/").SendAsync("PUT");
+
+        response.EnsureSuccessStatusCode();
+    }
+
+    [Fact]
+    public async Task CorsMiddleware_WithCorsEndpoint_PreflightRequest()
+    {
+        // Arrange
+        using var host = new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
+            {
+                webHostBuilder
+                    .Configure(app =>
+                    {
+                        app.UseRouting();
+                        app.UseCors();
+                        app.UseEndpoints(b => b.MapPut("/", TestDelegate).RequireCors(policy => policy.AllowAnyOrigin().AllowAnyMethod()));
+                    })
+                    .UseTestServer();
+            })
+            .ConfigureServices(services =>
+            {
+                services.AddCors();
+                services.AddRouting();
+            })
+            .Build();
+
+        using var server = host.GetTestServer();
+
+        await host.StartAsync();
+
+        var request = server.CreateRequest("/");
+        request.AddHeader(HeaderNames.Origin, "http://testlocation.com");
+        request.AddHeader(HeaderNames.AccessControlRequestMethod, HttpMethods.Put);
+
+        var response = await request.SendAsync(HttpMethods.Options);
+
+        response.EnsureSuccessStatusCode();
+    }
+
+    [Fact]
+    public async Task CorsMiddleware_ConfiguredBeforeRouting_Throws()
+    {
+        // Arrange
+        using var host = new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
+            {
+                webHostBuilder
+                    .Configure(app =>
+                    {
+                        app.UseCors();
+                        app.UseRouting();
+                        app.UseEndpoints(b => b.Map("/", TestDelegate).RequireCors(policy => policy.AllowAnyOrigin()));
+                    })
+                    .UseTestServer();
+            })
+            .ConfigureServices(services =>
+            {
+                services.AddCors();
+                services.AddRouting();
+            })
+            .Build();
+
+        using var server = host.GetTestServer();
+
+        await host.StartAsync();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => server.CreateRequest("/").SendAsync("GET"));
+        Assert.Equal(CORSErrorMessage, ex.Message);
     }
 }

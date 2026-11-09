@@ -3,11 +3,10 @@
 
   <PropertyGroup>
     <SchemaVersion>2.0</SchemaVersion>
-    <ProductVersion>3.11</ProductVersion>
-    <WixVersion>3.11.1</WixVersion>
   </PropertyGroup>
 
   <PropertyGroup>
+    <CustomBeforeWixTargets>$(MSBuildThisFileDirectory)BeforeWix.Common.targets</CustomBeforeWixTargets>
     <TargetFrameworkMoniker>Native,Version=v0.0</TargetFrameworkMoniker>
 
     <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
@@ -17,18 +16,19 @@
     <NuGetRestoreTargets Condition="'$(NuGetRestoreTargets)'==''">$(MSBuildToolsPath)\NuGet.targets</NuGetRestoreTargets>
   </PropertyGroup>
 
-  <Import Project="$(MSBuildProjectExtensionsPath)$(MSBuildProjectFile).*.props" Condition="'$(_ProjectExtensionsWereImported)' != 'true'" />
-
   <ItemGroup>
-    <PackageReference Include="Wix" Version="$(WixVersion)" />
+    <!-- Microsoft.Wix is a dotnet tool package, so exlude its assets. -->
+    <PackageReference Include="Microsoft.Wix" ExcludeAssets="all" />
+    <!-- Installers needs the $(PkgMicrosoftWixToolsetUIwixext) property to locate the extension. -->
+    <PackageReference Include="Microsoft.WixToolset.Bal.wixext" GeneratePathProperty="true" />
+    <PackageReference Include="Microsoft.WixToolset.Dependency.wixext" GeneratePathProperty="true" />
+    <PackageReference Include="Microsoft.WixToolset.Heat" />
+    <PackageReference Include="Microsoft.WixToolset.UI.wixext" GeneratePathProperty="true" />
+    <PackageReference Include="Microsoft.WixToolset.Util.wixext" GeneratePathProperty="true" />
   </ItemGroup>
 
   <PropertyGroup>
-    <SignOutput Condition=" '$(SignType)' != '' ">true</SignOutput>
+    <SignOutput>false</SignOutput>
     <DarkToolPath>$(WixExtDir)dark.exe</DarkToolPath>
   </PropertyGroup>
-
-  <Import Project="MicroBuild.Plugin.props" Condition="'$(MicroBuildSentinelFile)' == ''" />
-  <Import Project="$(MicroBuildPluginDirectory)\MicroBuild.Plugins.*\**\build\MicroBuild.Plugins.*.props" Condition=" '$(MicroBuildPluginDirectory)' != ''" />
-
 </Project>

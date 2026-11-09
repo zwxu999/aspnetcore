@@ -1,102 +1,136 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Security.Claims;
+using Microsoft.AspNetCore.Components.Infrastructure;
 using Microsoft.AspNetCore.Components.Routing;
+using Microsoft.AspNetCore.Components.Web;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.JSInterop;
 
-namespace Microsoft.AspNetCore.Components.Server.Circuits
+namespace Microsoft.AspNetCore.Components.Server.Circuits;
+
+internal sealed partial class CircuitFactory : ICircuitFactory
 {
-    internal class CircuitFactory
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ILoggerFactory _loggerFactory;
+    private readonly CircuitIdFactory _circuitIdFactory;
+    private readonly CircuitOptions _options;
+    private readonly ILogger _logger;
+    private readonly CircuitMetrics _circuitMetrics;
+
+    public CircuitFactory(
+        IServiceScopeFactory scopeFactory,
+        ILoggerFactory loggerFactory,
+        CircuitIdFactory circuitIdFactory,
+        CircuitMetrics circuitMetrics,
+        IOptions<CircuitOptions> options)
     {
-        private readonly IServiceScopeFactory _scopeFactory;
-        private readonly ILoggerFactory _loggerFactory;
-        private readonly CircuitIdFactory _circuitIdFactory;
-        private readonly CircuitOptions _options;
-        private readonly ILogger _logger;
+        _scopeFactory = scopeFactory;
+        _loggerFactory = loggerFactory;
+        _circuitIdFactory = circuitIdFactory;
+        _options = options.Value;
+        _logger = _loggerFactory.CreateLogger<CircuitFactory>();
 
-        public CircuitFactory(
-            IServiceScopeFactory scopeFactory,
-            ILoggerFactory loggerFactory,
-            CircuitIdFactory circuitIdFactory,
-            IOptions<CircuitOptions> options)
+        _circuitMetrics = circuitMetrics;
+    }
+
+    public async ValueTask<CircuitHost> CreateCircuitHostAsync(
+        IReadOnlyList<ComponentDescriptor> components,
+        CircuitClientProxy client,
+        string baseUri,
+        string uri,
+        ClaimsPrincipal user,
+        IPersistentComponentStateStore store,
+        ResourceAssetCollection resourceCollection)
+    {
+        var scope = _scopeFactory.CreateAsyncScope();
+        var jsRuntime = (RemoteJSRuntime)scope.ServiceProvider.GetRequiredService<IJSRuntime>();
+        jsRuntime.Initialize(client);
+
+        var navigationManager = (RemoteNavigationManager)scope.ServiceProvider.GetRequiredService<NavigationManager>();
+        var navigationInterception = (RemoteNavigationInterception)scope.ServiceProvider.GetRequiredService<INavigationInterception>();
+        var scrollToLocationHash = (RemoteScrollToLocationHash)scope.ServiceProvider.GetRequiredService<IScrollToLocationHash>();
+        var circuitActivitySource = scope.ServiceProvider.GetRequiredService<CircuitActivitySource>();
+
+        if (client.Connected)
         {
-            _scopeFactory = scopeFactory;
-            _loggerFactory = loggerFactory;
-            _circuitIdFactory = circuitIdFactory;
-            _options = options.Value;
-            _logger = _loggerFactory.CreateLogger<CircuitFactory>();
+            navigationManager.AttachJsRuntime(jsRuntime);
+            navigationManager.Initialize(baseUri, uri);
+
+            navigationInterception.AttachJSRuntime(jsRuntime);
+            scrollToLocationHash.AttachJSRuntime(jsRuntime);
+        }
+        else
+        {
+            navigationManager.Initialize(baseUri, uri);
         }
 
-        public CircuitHost CreateCircuitHost(
-            IReadOnlyList<ComponentDescriptor> components,
-            CircuitClientProxy client,
-            string baseUri,
-            string uri,
-            ClaimsPrincipal user)
+        if (components.Count > 0)
         {
-            var scope = _scopeFactory.CreateScope();
-            var jsRuntime = (RemoteJSRuntime)scope.ServiceProvider.GetRequiredService<IJSRuntime>();
-            jsRuntime.Initialize(client);
-
-            var navigationManager = (RemoteNavigationManager)scope.ServiceProvider.GetRequiredService<NavigationManager>();
-            var navigationInterception = (RemoteNavigationInterception)scope.ServiceProvider.GetRequiredService<INavigationInterception>();
-            if (client.Connected)
-            {
-                navigationManager.AttachJsRuntime(jsRuntime);
-                navigationManager.Initialize(baseUri, uri);
-
-                navigationInterception.AttachJSRuntime(jsRuntime);
-            }
-            else
-            {
-                navigationManager.Initialize(baseUri, uri);
-            }
-
-            var renderer = new RemoteRenderer(
-                scope.ServiceProvider,
-                _loggerFactory,
-                _options,
-                client,
-                _loggerFactory.CreateLogger<RemoteRenderer>(),
-                jsRuntime.ElementReferenceContext);
-
-            var circuitHandlers = scope.ServiceProvider.GetServices<CircuitHandler>()
-                .OrderBy(h => h.Order)
-                .ToArray();
-
-            var circuitHost = new CircuitHost(
-                _circuitIdFactory.CreateCircuitId(),
-                scope,
-                _options,
-                client,
-                renderer,
-                components,
-                jsRuntime,
-                circuitHandlers,
-                _loggerFactory.CreateLogger<CircuitHost>());
-            Log.CreatedCircuit(_logger, circuitHost);
-
-            // Initialize per - circuit data that services need
-            (circuitHost.Services.GetRequiredService<ICircuitAccessor>() as DefaultCircuitAccessor).Circuit = circuitHost.Circuit;
-            circuitHost.SetCircuitUser(user);
-
-            return circuitHost;
+            // Skip initializing the state if there are no components.
+            // This is the case on Blazor Web scenarios, which will initialize the state
+            // when the first set of components is provided via an UpdateRootComponents call.
+            var appLifetime = scope.ServiceProvider.GetRequiredService<ComponentStatePersistenceManager>();
+            appLifetime.SetPlatformRenderMode(RenderMode.InteractiveServer);
+            await appLifetime.RestoreStateAsync(store, RestoreContext.InitialValue);
         }
 
-        private static class Log
-        {
-            private static readonly Action<ILogger, string, string, Exception> _createdCircuit =
-                LoggerMessage.Define<string, string>(LogLevel.Debug, new EventId(1, "CreatedCircuit"), "Created circuit {CircuitId} for connection {ConnectionId}");
+        var serverComponentDeserializer = scope.ServiceProvider.GetRequiredService<IServerComponentDeserializer>();
+        var jsComponentInterop = new CircuitJSComponentInterop(_options);
+        var renderer = new RemoteRenderer(
+            scope.ServiceProvider,
+            _loggerFactory,
+            _options,
+            client,
+            serverComponentDeserializer,
+            _loggerFactory.CreateLogger<RemoteRenderer>(),
+            jsRuntime,
+            jsComponentInterop,
+            resourceCollection);
 
-            internal static void CreatedCircuit(ILogger logger, CircuitHost circuitHost) =>
-                _createdCircuit(logger, circuitHost.CircuitId.Id, circuitHost.Client.ConnectionId, null);
-        }
+        circuitActivitySource.Init(new Infrastructure.Server.ComponentsActivityLinkStore(renderer));
+        renderer.GetOrCreateWebRootComponentManager();
+
+        // In Blazor Server we have already restored the app state, so we can get the handlers from DI.
+        // In Blazor Web the state is provided in the first call to UpdateRootComponents, so we need to
+        // delay creating the handlers until then. Otherwise, a handler would be able to access the state
+        // in the constructor for Blazor Server, but not in Blazor Web.
+        var circuitHandlers = components.Count == 0 ? [] : scope.ServiceProvider.GetServices<CircuitHandler>()
+            .OrderBy(h => h.Order)
+            .ToArray();
+
+        var circuitHost = new CircuitHost(
+            _circuitIdFactory.CreateCircuitId(),
+            scope,
+            _options,
+            client,
+            renderer,
+            components,
+            jsRuntime,
+            navigationManager,
+            circuitHandlers,
+            _circuitMetrics,
+            circuitActivitySource,
+            _loggerFactory.CreateLogger<CircuitHost>());
+        Log.CreatedCircuit(_logger, circuitHost);
+
+        // Initialize per - circuit data that services need
+        (circuitHost.Services.GetRequiredService<ICircuitAccessor>() as DefaultCircuitAccessor).Circuit = circuitHost.Circuit;
+        circuitHost.SetCircuitUser(user);
+
+        return circuitHost;
+    }
+
+    private static partial class Log
+    {
+        [LoggerMessage(1, LogLevel.Debug, "Created circuit {CircuitId} for connection {ConnectionId}", EventName = "CreatedCircuit")]
+        private static partial void CreatedCircuit(ILogger logger, string circuitId, string connectionId);
+
+        internal static void CreatedCircuit(ILogger logger, CircuitHost circuitHost) =>
+            CreatedCircuit(logger, circuitHost.CircuitId.Id, circuitHost.Client.ConnectionId);
     }
 }

@@ -1,5 +1,5 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
 using System.IO;
@@ -9,73 +9,72 @@ using Microsoft.DotNet.Openapi.Tools;
 using Microsoft.Extensions.CommandLineUtils;
 using Microsoft.Extensions.Tools.Internal;
 
-namespace Microsoft.DotNet.OpenApi.Commands
+namespace Microsoft.DotNet.OpenApi.Commands;
+
+internal sealed class AddFileCommand : BaseCommand
 {
-    internal class AddFileCommand : BaseCommand
+    private const string CommandName = "file";
+
+    private const string SourceFileArgName = "source-file";
+
+    public AddFileCommand(AddCommand parent, IHttpClientWrapper httpClient)
+        : base(parent, CommandName, httpClient)
     {
-        private const string CommandName = "file";
+        _codeGeneratorOption = Option("-c|--code-generator", "The code generator to use. Defaults to 'NSwagCSharp'.", CommandOptionType.SingleValue);
+        _sourceFileArg = Argument(SourceFileArgName, $"The OpenAPI file to add. This must be a path to local OpenAPI file(s)", multipleValues: true);
+    }
 
-        private const string SourceFileArgName = "source-file";
+    internal readonly CommandArgument _sourceFileArg;
+    internal readonly CommandOption _codeGeneratorOption;
 
-        public AddFileCommand(AddCommand parent, IHttpClientWrapper httpClient)
-            : base(parent, CommandName, httpClient)
+    private readonly string[] ApprovedExtensions = new[] { ".json", ".yaml", ".yml" };
+
+    protected override async Task<int> ExecuteCoreAsync()
+    {
+        ArgumentException.ThrowIfNullOrEmpty(_sourceFileArg.Value);
+
+        var projectFilePath = ResolveProjectFile(ProjectFileOption);
+        var codeGenerator = GetCodeGenerator(_codeGeneratorOption);
+
+        foreach (var sourceFile in _sourceFileArg.Values)
         {
-            _codeGeneratorOption = Option("-c|--code-generator", "The code generator to use. Defaults to 'NSwagCSharp'.", CommandOptionType.SingleValue);
-            _sourceFileArg = Argument(SourceFileArgName, $"The OpenAPI file to add. This must be a path to local OpenAPI file(s)", multipleValues: true);
+            if (!ApprovedExtensions.Any(e => sourceFile.EndsWith(e, StringComparison.Ordinal)))
+            {
+                await Warning.WriteLineAsync($"The extension for the given file '{sourceFile}' should have been one of: {string.Join(",", ApprovedExtensions)}.");
+                await Warning.WriteLineAsync($"The reference has been added, but may fail at build-time if the format is not correct.");
+            }
+            await AddOpenAPIReference(OpenApiReference, projectFilePath, sourceFile, codeGenerator);
         }
 
-        internal readonly CommandArgument _sourceFileArg;
-        internal readonly CommandOption _codeGeneratorOption;
+        return 0;
+    }
 
-        private readonly string[] ApprovedExtensions = new[] { ".json", ".yaml", ".yml" };
+    private bool IsLocalFile(string file)
+    {
+        return File.Exists(GetFullPath(file));
+    }
 
-        protected override async Task<int> ExecuteCoreAsync()
+    protected override bool ValidateArguments()
+    {
+        ValidateCodeGenerator(_codeGeneratorOption);
+
+        try
         {
-            var projectFilePath = ResolveProjectFile(ProjectFileOption);
-
-            Ensure.NotNullOrEmpty(_sourceFileArg.Value, SourceFileArgName);
-            var codeGenerator = GetCodeGenerator(_codeGeneratorOption);
-
-            foreach (var sourceFile in _sourceFileArg.Values)
-            {
-                if (!ApprovedExtensions.Any(e => sourceFile.EndsWith(e)))
-                {
-                    await Warning.WriteLineAsync($"The extension for the given file '{sourceFile}' should have been one of: {string.Join(",", ApprovedExtensions)}.");
-                    await Warning.WriteLineAsync($"The reference has been added, but may fail at build-time if the format is not correct.");
-                }
-                await AddOpenAPIReference(OpenApiReference, projectFilePath, sourceFile, codeGenerator);
-            }
-
-            return 0;
+            ArgumentException.ThrowIfNullOrEmpty(_sourceFileArg.Value);
+        }
+        catch (ArgumentException ex)
+        {
+            Error.Write(ex.Message);
+            return false;
         }
 
-        private bool IsLocalFile(string file)
+        foreach (var sourceFile in _sourceFileArg.Values)
         {
-            return File.Exists(GetFullPath(file));
+            if (!IsLocalFile(sourceFile))
+            {
+                Error.Write($"{SourceFileArgName} of '{sourceFile}' could not be found.");
+            }
         }
-
-        protected override bool ValidateArguments()
-        {
-            ValidateCodeGenerator(_codeGeneratorOption);
-
-            try
-            {
-                Ensure.NotNullOrEmpty(_sourceFileArg.Value, SourceFileArgName);
-            }
-            catch(ArgumentException ex)
-            {
-                Error.Write(ex.Message);
-                return false;
-            }
-
-            foreach (var sourceFile in _sourceFileArg.Values)
-            {
-                if (!IsLocalFile(sourceFile))
-                {
-                    Error.Write($"{SourceFileArgName} of '{sourceFile}' could not be found.");
-                }
-            }
-            return true;
-        }
+        return true;
     }
 }

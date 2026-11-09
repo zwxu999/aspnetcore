@@ -1,57 +1,60 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
 
-namespace Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation
+namespace Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation;
+
+internal sealed class RuntimeCompilationFileProvider
 {
-    internal class RuntimeCompilationFileProvider
+#pragma warning disable ASPDEPR003 // Type or member is obsolete
+    private readonly MvcRazorRuntimeCompilationOptions _options;
+#pragma warning restore ASPDEPR003 // Type or member is obsolete
+    private IFileProvider? _compositeFileProvider;
+
+#pragma warning disable ASPDEPR003 // Type or member is obsolete
+    public RuntimeCompilationFileProvider(IOptions<MvcRazorRuntimeCompilationOptions> options)
+#pragma warning restore ASPDEPR003 // Type or member is obsolete
     {
-        private readonly MvcRazorRuntimeCompilationOptions _options;
-        private IFileProvider _compositeFileProvider;
+        ArgumentNullException.ThrowIfNull(options);
 
-        public RuntimeCompilationFileProvider(IOptions<MvcRazorRuntimeCompilationOptions> options)
+        _options = options.Value;
+    }
+
+    public IFileProvider FileProvider
+    {
+        get
         {
-            if (options == null)
+            if (_compositeFileProvider == null)
             {
-                throw new ArgumentNullException(nameof(options));
+                _compositeFileProvider = GetCompositeFileProvider(_options);
             }
 
-            _options = options.Value;
+            return _compositeFileProvider;
+        }
+    }
+
+#pragma warning disable ASPDEPR003 // Type or member is obsolete
+    private static IFileProvider GetCompositeFileProvider(MvcRazorRuntimeCompilationOptions options)
+#pragma warning restore ASPDEPR003 // Type or member is obsolete
+    {
+        var fileProviders = options.FileProviders;
+        if (fileProviders.Count == 0)
+        {
+#pragma warning disable ASPDEPR003 // Type or member is obsolete
+            var message = Resources.FormatFileProvidersAreRequired(
+                typeof(MvcRazorRuntimeCompilationOptions).FullName,
+                nameof(MvcRazorRuntimeCompilationOptions.FileProviders),
+                typeof(IFileProvider).FullName);
+#pragma warning restore ASPDEPR003 // Type or member is obsolete
+            throw new InvalidOperationException(message);
+        }
+        else if (fileProviders.Count == 1)
+        {
+            return fileProviders[0];
         }
 
-        public IFileProvider FileProvider
-        {
-            get
-            {
-                if (_compositeFileProvider == null)
-                {
-                    _compositeFileProvider = GetCompositeFileProvider(_options);
-                }
-
-                return _compositeFileProvider;
-            }
-        }
-
-        private static IFileProvider GetCompositeFileProvider(MvcRazorRuntimeCompilationOptions options)
-        {
-            var fileProviders = options.FileProviders;
-            if (fileProviders.Count == 0)
-            {
-                var message = Resources.FormatFileProvidersAreRequired(
-                    typeof(MvcRazorRuntimeCompilationOptions).FullName,
-                    nameof(MvcRazorRuntimeCompilationOptions.FileProviders),
-                    typeof(IFileProvider).FullName);
-                throw new InvalidOperationException(message);
-            }
-            else if (fileProviders.Count == 1)
-            {
-                return fileProviders[0];
-            }
-
-            return new CompositeFileProvider(fileProviders);
-        }
+        return new CompositeFileProvider(fileProviders);
     }
 }

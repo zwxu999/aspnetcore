@@ -1,66 +1,79 @@
 <Project>
+
   <PropertyGroup>
-    <!-- The one use of ArtifactsDir in Publish.proj adds an additional slash, confusing itself. -->
-    <ArtifactsDir Condition=" HasTrailingSlash('$(ArtifactsDir)') ">$(ArtifactsDir.Substring(0, $([MSBuild]::Subtract($(ArtifactsDir.Length), 1))))</ArtifactsDir>
+    <ProducesDotNetReleaseShippingAssets>true</ProducesDotNetReleaseShippingAssets>
 
-    <PublishDependsOnTargets>$(PublishDependsOnTargets);_PublishInstallersAndChecksums</PublishDependsOnTargets>
+    <!-- Don't sign and publish rid agnostic nuget packages from other builds than windows when not building
+         inside the VMR. Do not remove if post build sign is true, as we avoid the xplat codesign jobs, and need to have
+         the nupkgs pushed. -->
+    <EnableDefaultArtifacts Condition="'$(OS)' != 'Windows_NT' and
+                                       '$(PostBuildSign)' != 'true' and
+                                       '$(DotNetBuild)' != 'true'">false</EnableDefaultArtifacts>
 
-    <_UploadPathRoot>aspnetcore</_UploadPathRoot>
+    <!-- This avoids creating VS.*.symbols.nupkg packages that are identical to the original package. -->
+    <AutoGenerateSymbolPackages>false</AutoGenerateSymbolPackages>
   </PropertyGroup>
 
   <!-- $(InstallersOutputPath), $(SymbolsOutputPath), and $(ChecksumExtensions) are not defined. Root Directory.Build.props is not imported. -->
   <ItemGroup>
     <!-- Include our "loose" PDBs when publishing symbols. -->
-    <FilesToPublishToSymbolServer Include="$(ArtifactsDir)\symbols\**\*.pdb" />
-
-    <!-- Prepare for _PublishInstallersAndChecksums target. -->
-    <_InstallersToPublish Remove="@(_InstallersToPublish)" />
-    <_InstallersToPublish Include="$(ArtifactsDir)\packages\**\*.jar" UploadPathSegment="jar" />
-    <_InstallersToPublish Include="$(ArtifactsDir)\packages\**\*.pom" UploadPathSegment="jar" />
-    <_InstallersToPublish Include="$(ArtifactsDir)\packages\**\*.tgz" UploadPathSegment="npm" />
-    <_InstallersToPublish Include="$(ArtifactsDir)\installers\**\*.deb" UploadPathSegment="Runtime" />
-    <_InstallersToPublish Include="$(ArtifactsDir)\installers\**\*.exe" UploadPathSegment="Runtime" />
-    <_InstallersToPublish Include="$(ArtifactsDir)\installers\**\*.msi" UploadPathSegment="Runtime" />
-    <_InstallersToPublish Include="$(ArtifactsDir)\installers\**\*.rpm" UploadPathSegment="Runtime" />
-    <_InstallersToPublish Include="$(ArtifactsDir)\installers\**\*.tar.gz" UploadPathSegment="Runtime" />
-    <_InstallersToPublish Include="$(ArtifactsDir)\installers\**\*.version" UploadPathSegment="Runtime"
-        Condition=" '$(PublishInstallerBaseVersion)' == 'true' " />
-    <_InstallersToPublish Include="$(ArtifactsDir)\installers\**\*.wixlib" UploadPathSegment="Runtime" />
-    <_InstallersToPublish Include="$(ArtifactsDir)\installers\**\*.zip" UploadPathSegment="Runtime" />
-    <_ChecksumsToPublish Include="$(ArtifactsDir)\**\*.sha512" />
+    <FilesToPublishToSymbolServer Include="$(ArtifactsDir)symbols\**\*.pdb" />
   </ItemGroup>
 
-  <Target Name="_PublishInstallersAndChecksums">
-    <!-- 
-      This target is defined in eng/targets/Packaging.targets and included in every C# and F# project.
-      We use Microsoft.AspNetCore.DeveloperCertificates.XPlat because it is a nonshipping package, and we need a non-stable version string to use as our publish location.
-      If Microsoft.AspNetCore.DeveloperCertificates.XPlat ever becomes a shipping package, this logic will break, so be careful
+  <Target Name="GetNonStableProductVersion">
+    <!--
+      This target is defined in eng/targets/Packaging.targets and Npm.Common.targets and included in every C#, F#,
+      and npm project. We use Microsoft.AspNetCore.InternalTesting.csproj because it is non-shipping (we need a non-stable
+      version string to use as our publish location) non-packed (won't be shipped in the future).
     -->
-    <MSBuild Projects="$(RepoRoot)src\Tools\FirstRunCertGenerator\src\Microsoft.AspNetCore.DeveloperCertificates.XPlat.csproj"
-        Targets="_GetPackageVersionInfo"
-        SkipNonexistentProjects="false">
+    <MSBuild Projects="$(RepoRoot)src\Testing\src\Microsoft.AspNetCore.InternalTesting.csproj"
+        Properties="ExcludeFromBuild=false"
+        Targets="_GetPackageVersionInfo">
       <Output TaskParameter="TargetOutputs" ItemName="_ResolvedPackageVersionInfo" />
     </MSBuild>
 
     <PropertyGroup>
-      <_PackageVersion>@(_ResolvedPackageVersionInfo->'%(PackageVersion)')</_PackageVersion>
+      <NonStableProductVersion>%(_ResolvedPackageVersionInfo.PackageVersion)</NonStableProductVersion>
+    </PropertyGroup>
+  </Target>
+
+  <!-- Generate productVersion.txt files containing the product version. -->
+  <Target Name="GenerateProductVersionFiles"
+          BeforeTargets="PublishToAzureDevOpsArtifacts"
+          Condition="'$(PublishInstallerBaseVersion)' == 'true' and '$(DotNetBuildPass)' != '2'">
+    <MSBuild Projects="$(RepoRoot)src\Testing\src\Microsoft.AspNetCore.InternalTesting.csproj"
+        Properties="ExcludeFromBuild=false;IsShipping=true"
+        Targets="_GetPackageVersionInfo">
+      <Output TaskParameter="TargetOutputs" ItemName="_ResolvedPackageVersionInfo" />
+    </MSBuild>
+
+    <PropertyGroup>
+      <ProductVersion>%(_ResolvedPackageVersionInfo.PackageVersion)</ProductVersion>
     </PropertyGroup>
 
     <ItemGroup>
-      <!-- Do not push .nupkg files from Linux and macOS builds. They'll be packed up separately and signed on Windows. -->
-      <ItemsToPushToBlobFeed Remove="@(ItemsToPushToBlobFeed)" Condition="'$(OS)' != 'Windows_NT'" />
+      <ProductVersionFile Include="$(ArtifactsShippingPackagesDir)productVersion.txt" />
+      <ProductVersionFile Include="$(ArtifactsShippingPackagesDir)aspnetcore-productVersion.txt" />
+    </ItemGroup>
 
-      <ItemsToPushToBlobFeed Include="@(_ChecksumsToPublish)">
-        <PublishFlatContainer>true</PublishFlatContainer>
-        <RelativeBlobPath>$(_UploadPathRoot)/Runtime/$(_PackageVersion)/%(Filename)%(Extension)</RelativeBlobPath>
-      </ItemsToPushToBlobFeed>
+    <WriteLinesToFile File="%(ProductVersionFile.Identity)"
+                      Lines="$(ProductVersion)"
+                      Overwrite="true"
+                      Encoding="ASCII" />
 
-      <ItemsToPushToBlobFeed Include="@(_InstallersToPublish)">
-        <IsShipping>true</IsShipping>
-        <ManifestArtifactData>ShipInstaller=dotnetcli</ManifestArtifactData>
-        <PublishFlatContainer>true</PublishFlatContainer>
-        <RelativeBlobPath>$(_UploadPathRoot)/%(_InstallersToPublish.UploadPathSegment)/$(_PackageVersion)/%(Filename)%(Extension)</RelativeBlobPath>
-      </ItemsToPushToBlobFeed>
+    <ItemGroup>
+      <Artifact Include="@(ProductVersionFile)" Kind="Blob" UploadPathSegment="Runtime/" />
     </ItemGroup>
   </Target>
+
+  <Target Name="AddRelativeBlobPathToBlobArtifacts"
+          BeforeTargets="PublishToAzureDevOpsArtifacts"
+          AfterTargets="GenerateProductVersionFiles;GenerateChecksumsFromArtifacts"
+          DependsOnTargets="GetNonStableProductVersion">
+    <ItemGroup>
+      <Artifact Condition="'%(Artifact.Kind)' == 'Blob' and '%(Artifact.RelativeBlobPath)' == ''"
+                RelativeBlobPath="aspnetcore/%(Artifact.UploadPathSegment)$(NonStableProductVersion)/%(Filename)%(Extension)" />
+    </ItemGroup>
+  </Target>
+
 </Project>

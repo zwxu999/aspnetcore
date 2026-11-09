@@ -1,44 +1,44 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
+#nullable enable
 
-namespace Microsoft.AspNetCore.Mvc.Infrastructure
+using Microsoft.AspNetCore.Http;
+
+namespace Microsoft.AspNetCore.Mvc.Infrastructure;
+
+internal sealed class ActionResultTypeMapper : IActionResultTypeMapper
 {
-    internal class ActionResultTypeMapper : IActionResultTypeMapper
+    public Type GetResultDataType(Type returnType)
     {
-        public Type GetResultDataType(Type returnType)
+        ArgumentNullException.ThrowIfNull(returnType);
+
+        if (returnType.IsGenericType &&
+            returnType.GetGenericTypeDefinition() == typeof(ActionResult<>))
         {
-            if (returnType == null)
-            {
-                throw new ArgumentNullException(nameof(returnType));
-            }
-
-            if (returnType.IsGenericType &&
-                returnType.GetGenericTypeDefinition() == typeof(ActionResult<>))
-            {
-                return returnType.GetGenericArguments()[0];
-            }
-
-            return returnType;
+            return returnType.GetGenericArguments()[0];
         }
 
-        public IActionResult Convert(object value, Type returnType)
+        return returnType;
+    }
+
+    public IActionResult Convert(object? value, Type returnType)
+    {
+        ArgumentNullException.ThrowIfNull(returnType);
+
+        if (value is IConvertToActionResult converter)
         {
-            if (returnType == null)
-            {
-                throw new ArgumentNullException(nameof(returnType));
-            }
-
-            if (value is IConvertToActionResult converter)
-            {
-                return converter.Convert();
-            }
-
-            return new ObjectResult(value)
-            {
-                DeclaredType = returnType,
-            };
+            return converter.Convert();
         }
+
+        if (value is IResult httpResult)
+        {
+            return new HttpActionResult(httpResult);
+        }
+
+        return new ObjectResult(value)
+        {
+            DeclaredType = returnType,
+        };
     }
 }

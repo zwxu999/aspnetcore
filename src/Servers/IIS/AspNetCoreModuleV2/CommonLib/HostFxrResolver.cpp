@@ -12,6 +12,10 @@
 #include "StringHelpers.h"
 #include "RegistryKey.h"
 
+// This is needed to use libnethost as a static library
+#define NETHOST_USE_AS_STATIC
+#include <nethost.h>
+
 namespace fs = std::filesystem;
 
 void
@@ -41,7 +45,7 @@ HostFxrResolver::GetHostFxrParameters(
         // The only executable extension inprocess supports
         expandedProcessPath.replace_extension(".exe");
     }
-    else if (!ends_with(expandedProcessPath, L".exe", true))
+    else if (!endsWith(expandedProcessPath, L".exe", true))
     {
         throw InvalidOperationException(format(L"Process path '%s' doesn't have '.exe' extension.", expandedProcessPath.c_str()));
     }
@@ -56,12 +60,46 @@ HostFxrResolver::GetHostFxrParameters(
             throw InvalidOperationException(L"Application arguments are empty.");
         }
 
+        bool gotHostFxrPath = false;
         if (dotnetExePath.empty())
         {
-            dotnetExePath = GetAbsolutePathToDotnet(applicationPhysicalPath, expandedProcessPath);
+            // need to find dotnet for get_host_fxr_path when dotnet is launched from the path
+            if (!equals_ignore_case(expandedProcessPath, L"dotnet.exe"))
+            {
+                fs::path expandedProcessPathParent = expandedProcessPath.parent_path();
+                gotHostFxrPath = TryGetHostFxrPath(hostFxrDllPath, expandedProcessPathParent, applicationPhysicalPath);
+            }
+            else
+            {
+                LOG_INFOF(L"get_hostfxr_path skipped due to expandedProcessPath being dotnet.exe");
+            }
+
+            if (gotHostFxrPath)
+            {
+                dotnetExePath = GetAbsolutePathToDotnetFromHostfxr(hostFxrDllPath);
+            }
+            else
+            {
+                // Get the dotnet absolute path to use as dotnet_root
+                dotnetExePath = GetAbsolutePathToDotnet(applicationPhysicalPath, expandedProcessPath);
+            }
         }
 
-        hostFxrDllPath = GetAbsolutePathToHostFxr(dotnetExePath);
+        // We have dotnetExePath, get host fxr path using dotnet_root if we haven't gotten it yet
+        if (!gotHostFxrPath)
+        {
+            LOG_INFOF(L"Trying get_hostfxr_path with dotnet path as dotnet root");
+            fs::path dotnetExePathParent = dotnetExePath.parent_path();
+            gotHostFxrPath = TryGetHostFxrPath(hostFxrDllPath, dotnetExePathParent, applicationPhysicalPath);
+            if (!gotHostFxrPath)
+            {
+                throw InvalidOperationException(format(L"get_hostfxr_path failed"));
+            }
+        }
+
+        // we have dotnetExe path and get_hostfxr_path has succeeded
+        LOG_INFOF(L"dotnetExePath '%ls'", dotnetExePath.c_str());
+        LOG_INFOF(L"hostFxrDllpath '%ls'", hostFxrDllPath.c_str());
 
         arguments.push_back(dotnetExePath);
         AppendArguments(
@@ -113,7 +151,7 @@ HostFxrResolver::GetHostFxrParameters(
             }
             else
             {
-                LOG_INFOF(L"hostfxr.dll found app local at '%ls', treating application as portable with launcher", hostFxrDllPath.c_str());
+                LOG_INFOF(L"hostfxr.dll not found at '%ls', treating application as portable with launcher", hostFxrDllPath.c_str());
 
                 // passing "dotnet" here because we don't know where dotnet.exe should come from
                 // so trying all fallbacks is appropriate
@@ -121,7 +159,12 @@ HostFxrResolver::GetHostFxrParameters(
                 {
                     dotnetExePath = GetAbsolutePathToDotnet(applicationPhysicalPath, L"dotnet");
                 }
-                hostFxrDllPath = GetAbsolutePathToHostFxr(dotnetExePath);
+
+                fs::path dotnetExePathParent = dotnetExePath.parent_path();
+                if (!TryGetHostFxrPath(hostFxrDllPath, dotnetExePathParent, applicationPhysicalPath))
+                {
+                    throw InvalidOperationException(format(L"get_hostfxr_path failed"));
+                }
 
                 // For portable with launcher apps we need dotnet.exe to be argv[0] and .dll be argv[1]
                 arguments.push_back(dotnetExePath);
@@ -144,7 +187,35 @@ HostFxrResolver::GetHostFxrParameters(
     }
 }
 
-BOOL
+bool
+HostFxrResolver::TryGetHostFxrPath(
+    fs::path& hostFxrDllPath,
+    const fs::path& dotnetRoot,
+    const fs::path& applicationPath)
+{
+    std::wstring hostfxrPath;
+    size_t size = MAX_PATH * 2;
+    hostfxrPath.resize(size);
+
+    get_hostfxr_parameters params{};
+    params.size = sizeof(get_hostfxr_parameters);
+    params.assembly_path = applicationPath.c_str();
+    params.dotnet_root = dotnetRoot.c_str();
+    LOG_INFOF(L"hostfxr.dotnet_root: '%ls'", params.dotnet_root);
+    LOG_INFOF(L"hostfxr.assembly_path: '%ls'", params.assembly_path);
+
+    int result = get_hostfxr_path(hostfxrPath.data(), &size, &params);
+    if (result != 0) {
+        LOG_INFOF(L"get_hostfxr_path failed (%x)", result);
+        return false;
+    }
+
+    hostfxrPath.resize(size);
+    hostFxrDllPath = hostfxrPath;
+    return true;
+}
+
+bool
 HostFxrResolver::IsDotnetExecutable(const std::filesystem::path& dotnetPath)
 {
     std::wstring filename = dotnetPath.filename().wstring();
@@ -202,7 +273,7 @@ HostFxrResolver::AppendArguments(
         std::wstring argument = pwzArgs[intArgsProcessed];
 
         // Try expanding arguments ending in .dll to a full paths
-        if (expandDllPaths && ends_with(argument, L".dll", true))
+        if (expandDllPaths && endsWith(argument, L".dll", true))
         {
             fs::path argumentAsPath = argument;
             if (argumentAsPath.is_relative())
@@ -313,77 +384,48 @@ HostFxrResolver::GetAbsolutePathToDotnet(
 }
 
 fs::path
-HostFxrResolver::GetAbsolutePathToHostFxr(
-    const fs::path & dotnetPath
-)
+HostFxrResolver::GetAbsolutePathToDotnetFromHostfxr(const fs::path& hostfxrPath)
 {
-    std::vector<std::wstring> versionFolders;
-    const auto hostFxrBase = dotnetPath.parent_path() / "host" / "fxr";
-
-    LOG_INFOF(L"Resolving absolute path to hostfxr.dll from '%ls'", dotnetPath.c_str());
-
-    if (!is_directory(hostFxrBase))
-    {
-        throw InvalidOperationException(format(L"Unable to find hostfxr directory at %s", hostFxrBase.c_str()));
-    }
-
-    FindDotNetFolders(hostFxrBase, versionFolders);
-
-    if (versionFolders.empty())
-    {
-        throw InvalidOperationException(format(L"Hostfxr directory '%s' doesn't contain any version subdirectories", hostFxrBase.c_str()));
-    }
-
-    const auto highestVersion = FindHighestDotNetVersion(versionFolders);
-    const auto hostFxrPath = hostFxrBase  / highestVersion / "hostfxr.dll";
-
-    if (!is_regular_file(hostFxrPath))
-    {
-        throw InvalidOperationException(format(L"hostfxr.dll not found at '%s'", hostFxrPath.c_str()));
-    }
-
-    LOG_INFOF(L"hostfxr.dll located at '%ls'", hostFxrPath.c_str());
-    return hostFxrPath;
+    return hostfxrPath.parent_path().parent_path().parent_path().parent_path() / "dotnet.exe";
 }
 
 //
 // Tries to call where.exe to find the location of dotnet.exe.
 // Will check that the bitness of dotnet matches the current
 // worker process bitness.
-// Returns true if a valid dotnet was found, else false.R
+// Returns true if a valid dotnet was found, else false.
 //
 std::optional<fs::path>
 HostFxrResolver::InvokeWhereToFindDotnet()
 {
     HRESULT             hr = S_OK;
     // Arguments to call where.exe
-    STARTUPINFOW        startupInfo = { 0 };
-    PROCESS_INFORMATION processInformation = { 0 };
-    SECURITY_ATTRIBUTES securityAttributes;
+    STARTUPINFOW        startupInfo{};
+    PROCESS_INFORMATION processInformation{};
+    SECURITY_ATTRIBUTES securityAttributes{};
 
-    CHAR                pzFileContents[READ_BUFFER_SIZE];
+    CHAR                pzFileContents[READ_BUFFER_SIZE]{0};
     HandleWrapper<InvalidHandleTraits>     hStdOutReadPipe;
     HandleWrapper<InvalidHandleTraits>     hStdOutWritePipe;
     HandleWrapper<InvalidHandleTraits>     hProcess;
     HandleWrapper<InvalidHandleTraits>     hThread;
-    CComBSTR            pwzDotnetName = NULL;
-    DWORD               dwFilePointer;
-    BOOL                fIsCurrentProcess64Bit;
-    DWORD               dwExitCode;
+    CComBSTR            pwzDotnetName = nullptr;
+    DWORD               dwFilePointer = 0;
+    DWORD               dwExitCode = 0;
     STRU                struDotnetSubstring;
     STRU                struDotnetLocationsString;
-    DWORD               dwNumBytesRead;
-    DWORD               dwBinaryType;
+    DWORD               dwNumBytesRead = 0;
     INT                 index = 0;
     INT                 prevIndex = 0;
     std::optional<fs::path> result;
 
     // Set the security attributes for the read/write pipe
     securityAttributes.nLength = sizeof(securityAttributes);
-    securityAttributes.lpSecurityDescriptor = NULL;
+    securityAttributes.lpSecurityDescriptor = nullptr;
     securityAttributes.bInheritHandle = TRUE;
 
     LOG_INFO(L"Invoking where.exe to find dotnet.exe");
+    auto currentProcessArch = Environment::GetCurrentProcessArchitecture();
 
     // Create a read/write pipe that will be used for reading the result of where.exe
     FINISHED_LAST_ERROR_IF(!CreatePipe(&hStdOutReadPipe, &hStdOutWritePipe, &securityAttributes, 0));
@@ -400,14 +442,14 @@ HostFxrResolver::InvokeWhereToFindDotnet()
     pwzDotnetName = L"\"where.exe\" dotnet.exe";
 
     // Create a process to invoke where.exe
-    FINISHED_LAST_ERROR_IF(!CreateProcessW(NULL,
+    FINISHED_LAST_ERROR_IF(!CreateProcessW(nullptr,
         pwzDotnetName,
-        NULL,
-        NULL,
+        nullptr,
+        nullptr,
         TRUE,
         CREATE_NO_WINDOW,
-        NULL,
-        NULL,
+        nullptr,
+        nullptr,
         &startupInfo,
         &processInformation
     ));
@@ -437,7 +479,7 @@ HostFxrResolver::InvokeWhereToFindDotnet()
 
     // Where succeeded.
     // Reset file pointer to the beginning of the file.
-    dwFilePointer = SetFilePointer(hStdOutReadPipe, 0, NULL, FILE_BEGIN);
+    dwFilePointer = SetFilePointer(hStdOutReadPipe, 0, nullptr, FILE_BEGIN);
     if (dwFilePointer == INVALID_SET_FILE_POINTER)
     {
         FINISHED_IF_FAILED(E_FAIL);
@@ -447,7 +489,7 @@ HostFxrResolver::InvokeWhereToFindDotnet()
     // As the call to where.exe succeeded (dotnet.exe was found), ReadFile should not hang.
     // TODO consider putting ReadFile in a separate thread with a timeout to guarantee it doesn't block.
     //
-    FINISHED_LAST_ERROR_IF (!ReadFile(hStdOutReadPipe, pzFileContents, READ_BUFFER_SIZE, &dwNumBytesRead, NULL));
+    FINISHED_LAST_ERROR_IF (!ReadFile(hStdOutReadPipe, pzFileContents, READ_BUFFER_SIZE, &dwNumBytesRead, nullptr));
 
     if (dwNumBytesRead >= READ_BUFFER_SIZE)
     {
@@ -457,13 +499,9 @@ HostFxrResolver::InvokeWhereToFindDotnet()
     }
 
     FINISHED_IF_FAILED(struDotnetLocationsString.CopyA(pzFileContents, dwNumBytesRead));
-
     LOG_INFOF(L"where.exe invocation returned: '%ls'", struDotnetLocationsString.QueryStr());
 
-    fIsCurrentProcess64Bit = Environment::IsRunning64BitProcess();
-
-    LOG_INFOF(L"Current process bitness type detected as isX64=%d", fIsCurrentProcess64Bit);
-
+    // Look for a dotnet.exe that matches the current process architecture
     while (TRUE)
     {
         index = struDotnetLocationsString.IndexOf(L"\r\n", prevIndex);
@@ -476,19 +514,21 @@ HostFxrResolver::InvokeWhereToFindDotnet()
         // \r\n is two wchars, so add 2 here.
         prevIndex = index + 2;
 
-        LOG_INFOF(L"Processing entry '%ls'", struDotnetSubstring.QueryStr());
-
-        if (LOG_LAST_ERROR_IF(!GetBinaryTypeW(struDotnetSubstring.QueryStr(), &dwBinaryType)))
+        ProcessorArchitecture dotnetArch = GetFileProcessorArchitecture(struDotnetSubstring.QueryStr());
+        if (dotnetArch == currentProcessArch)
         {
-            continue;
-        }
+            LOG_INFOF(L"Found dotnet.exe matching current process architecture (%ls) '%ls'",
+                ProcessorArchitectureToString(dotnetArch),
+                struDotnetSubstring.QueryStr());
 
-        LOG_INFOF(L"Binary type %d", dwBinaryType);
-
-        if (fIsCurrentProcess64Bit == (dwBinaryType == SCS_64BIT_BINARY))
-        {
-            // The bitness of dotnet matched with the current worker process bitness.
             return std::make_optional(struDotnetSubstring.QueryStr());
+        }
+        else
+        {
+            LOG_INFOF(L"Skipping dotnet.exe with non-matching architecture %ls (need %ls). '%ls'",
+                ProcessorArchitectureToString(dotnetArch),
+                ProcessorArchitectureToString(currentProcessArch),
+                struDotnetSubstring.QueryStr());
         }
     }
 
@@ -496,48 +536,64 @@ HostFxrResolver::InvokeWhereToFindDotnet()
     return result;
 }
 
+// Reads the PE header of the binary to determine its architecture.
+ProcessorArchitecture HostFxrResolver::GetFileProcessorArchitecture(const WCHAR* binaryPath)
+{
+    // Errors while reading from the file shouldn't throw unless
+    // file.exception(bits) is set
+    std::ifstream file(binaryPath, std::ios::binary);
+    if (!file.is_open())
+    {
+        LOG_TRACEF(L"Failed to open file %ls", binaryPath);
+        return ProcessorArchitecture::Unknown;
+    }
+
+    // Read the DOS header
+    IMAGE_DOS_HEADER dosHeader{};
+    file.read(reinterpret_cast<char*>(&dosHeader), sizeof(dosHeader));
+    if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE) // 'MZ'
+    {
+        LOG_TRACEF(L"%ls is not a valid executable file (missing MZ header).", binaryPath);
+        return ProcessorArchitecture::Unknown;
+    }
+
+    // Seek to the PE header
+    file.seekg(dosHeader.e_lfanew, std::ios::beg);
+
+    // Read the PE header
+    DWORD peSignature{};
+    file.read(reinterpret_cast<char*>(&peSignature), sizeof(peSignature));
+    if (peSignature != IMAGE_NT_SIGNATURE) // 'PE\0\0'
+    {
+        LOG_TRACEF(L"%ls is not a valid PE file (missing PE header).", binaryPath);
+        return ProcessorArchitecture::Unknown;
+    }
+
+    // Read the file header
+    IMAGE_FILE_HEADER fileHeader{};
+    file.read(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader));
+
+    // Determine the architecture based on the machine type
+    switch (fileHeader.Machine)
+    {
+        case IMAGE_FILE_MACHINE_I386:
+            LOG_INFOF(L"%ls is x86 (32-bit)", binaryPath);
+            return ProcessorArchitecture::x86;
+        case IMAGE_FILE_MACHINE_AMD64:
+            LOG_INFOF(L"%ls is AMD64 (x64)", binaryPath);
+            return ProcessorArchitecture::AMD64;
+        case IMAGE_FILE_MACHINE_ARM64:
+            LOG_INFOF(L"%ls is ARM64", binaryPath);
+            return ProcessorArchitecture::ARM64;
+        default:
+            LOG_INFOF(L"%ls has unknown architecture (machine type: 0x%X)", binaryPath, fileHeader.Machine);
+            return ProcessorArchitecture::Unknown;
+    }
+}
+
 std::optional<fs::path>
 HostFxrResolver::GetAbsolutePathToDotnetFromProgramFiles()
 {
     const auto programFilesDotnet = fs::path(Environment::ExpandEnvironmentVariables(L"%ProgramFiles%")) / "dotnet" / "dotnet.exe";
     return is_regular_file(programFilesDotnet) ? std::make_optional(programFilesDotnet) : std::nullopt;
-}
-
-std::wstring
-HostFxrResolver::FindHighestDotNetVersion(
-    _In_ std::vector<std::wstring> & vFolders
-)
-{
-    fx_ver_t max_ver(-1, -1, -1);
-    for (const auto& dir : vFolders)
-    {
-        fx_ver_t fx_ver(-1, -1, -1);
-        if (fx_ver_t::parse(dir, &fx_ver, false))
-        {
-            max_ver = max(max_ver, fx_ver);
-        }
-    }
-
-    return max_ver.as_str();
-}
-
-VOID
-HostFxrResolver::FindDotNetFolders(
-    const std::filesystem::path &path,
-    _Out_ std::vector<std::wstring> &pvFolders
-)
-{
-    WIN32_FIND_DATAW data = {};
-    const auto searchPattern = std::wstring(path) + L"\\*";
-    HandleWrapper<FindFileHandleTraits> handle = FindFirstFileExW(searchPattern.c_str(), FindExInfoStandard, &data, FindExSearchNameMatch, nullptr, 0);
-    if (handle == INVALID_HANDLE_VALUE)
-    {
-        LOG_LAST_ERROR();
-        return;
-    }
-
-    do
-    {
-        pvFolders.emplace_back(data.cFileName);
-    } while (FindNextFileW(handle, &data));
 }

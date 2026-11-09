@@ -1,51 +1,71 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
-using System.Runtime.InteropServices;
+using Microsoft.AspNetCore.Internal;
 
-namespace Microsoft.AspNetCore.Http.Connections.Client.Internal
+namespace Microsoft.AspNetCore.Http.Connections.Client.Internal;
+
+internal static class Utils
 {
-    internal static class Utils
+    public static Uri CreateEndPointUri(Uri url)
     {
-        public static Uri AppendPath(Uri url, string path)
+        // The EndPoint URI shouldn't have querystring or target.
+        var uriBuilder = new UriBuilder
         {
-            var builder = new UriBuilder(url);
-            if (!builder.Path.EndsWith("/"))
+            Scheme = url.Scheme,
+            Host = url.Host,
+            Port = url.Port,
+            Path = url.AbsolutePath
+        };
+        return uriBuilder.Uri;
+    }
+
+    public static Uri AppendPath(Uri url, string path)
+    {
+        var builder = new UriBuilder(url);
+        if (!builder.Path.EndsWith("/", StringComparison.Ordinal))
+        {
+            builder.Path += "/";
+        }
+        builder.Path += path;
+        return builder.Uri;
+    }
+
+    internal static bool HasQueryStringParameter(string query, string key)
+    {
+        foreach (var pair in new QueryStringEnumerable(query))
+        {
+            if (pair.EncodedName.Span.SequenceEqual(key.AsSpan()))
             {
-                builder.Path += "/";
+                return true;
             }
-            builder.Path += path;
-            return builder.Uri;
         }
 
-        internal static Uri AppendQueryString(Uri url, string qs)
+        return false;
+    }
+
+    internal static Uri AppendQueryString(Uri url, string qs)
+    {
+        if (string.IsNullOrEmpty(qs))
         {
-            if (string.IsNullOrEmpty(qs))
-            {
-                return url;
-            }
-
-            var builder = new UriBuilder(url);
-            var newQueryString = builder.Query;
-            if (!string.IsNullOrEmpty(builder.Query))
-            {
-                newQueryString += "&";
-            }
-            newQueryString += qs;
-
-            if (newQueryString.Length > 0 && newQueryString[0] == '?')
-            {
-                newQueryString = newQueryString.Substring(1);
-            }
-
-            builder.Query = newQueryString;
-            return builder.Uri;
+            return url;
         }
 
-        internal static bool IsRunningInBrowser()
+        var builder = new UriBuilder(url);
+        var newQueryString = builder.Query;
+        if (!string.IsNullOrEmpty(builder.Query))
         {
-            return RuntimeInformation.IsOSPlatform(OSPlatform.Create("BROWSER"));
+            newQueryString += "&";
         }
+        newQueryString += qs;
+
+        if (newQueryString.Length > 0 && newQueryString[0] == '?')
+        {
+            newQueryString = newQueryString.Substring(1);
+        }
+
+        builder.Query = newQueryString;
+        return builder.Uri;
     }
 }

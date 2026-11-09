@@ -6,34 +6,39 @@
 .PARAMETER Edition
     Selects which 'offering' of Visual Studio to install. Must be one of these values:
         BuildTools
-        Community
+        Community (the default)
         Professional
-        Enterprise (the default)
+        Enterprise
 .PARAMETER Channel
     Selects which channel of Visual Studio to install. Must be one of these values:
-        Release (the default)
-        Preview
+        Release/Stable (the default)
+        Preview/Insiders
+.PARAMETER Version
+    Selects which version of Visual Studio to install. Must be one of these values:
+        2026
 .PARAMETER InstallPath
     The location on disk where Visual Studio should be installed or updated. Default path is location of latest
     existing installation of the specified edition, if any. If that VS edition is not currently installed, default
-    path is '${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\`$Edition".
+    path is '${env:ProgramFiles}\Microsoft Visual Studio\`$Version\`$Edition".
 .PARAMETER Passive
     Run the installer without requiring interaction.
 .PARAMETER Quiet
     Run the installer without UI and wait for installation to complete.
 .LINK
     https://visualstudio.com
-    https://github.com/dotnet/aspnetcore/blob/master/docs/BuildFromSource.md
+    https://github.com/dotnet/aspnetcore/blob/main/docs/BuildFromSource.md
 .EXAMPLE
-    To install VS 2019 Enterprise, run this command in PowerShell:
+    To install VS 2026 Community, run this command in PowerShell:
 
         .\InstallVisualStudio.ps1
 #>
 param(
     [ValidateSet('BuildTools','Community', 'Professional', 'Enterprise')]
-    [string]$Edition = 'Enterprise',
-    [ValidateSet('Release', 'Preview')]
+    [string]$Edition = 'Community',
+    [ValidateSet('Release', 'Stable', 'Preview', 'Insiders', 'IntPreview', 'Dogfood')]
     [string]$Channel = 'Release',
+    [ValidateSet('2026')]
+    [string]$Version = '2026',
     [string]$InstallPath,
     [switch]$Passive,
     [switch]$Quiet
@@ -59,21 +64,36 @@ mkdir $intermedateDir -ErrorAction Ignore | Out-Null
 $bootstrapper = "$intermedateDir\vsinstaller.exe"
 $ProgressPreference = 'SilentlyContinue' # Workaround PowerShell/PowerShell#2138
 
-$channelUri = "https://aka.ms/vs/16/release"
-$responseFileName = "vs"
+$vsversion = 18;
+
+# Normalize channel names (Stable=Release, Insiders=Preview, Dogfood=IntPreview)
+switch ($Channel) {
+    'Stable' { $Channel = 'Release' }
+    'Insiders' { $Channel = 'Preview' }
+    'Dogfood' { $Channel = 'IntPreview' }
+}
+
+$responseFileName = "vs.$vsversion"
 if ("$Edition" -eq "BuildTools") {
     $responseFileName += ".buildtools"
 }
+
 if ("$Channel" -eq "Preview") {
     $responseFileName += ".preview"
-    $channelUri = "https://aka.ms/vs/16/pre"
+    $channelUri = "https://aka.ms/vs/$vsversion/insiders"
+} elseif ("$Channel" -eq "IntPreview") {
+    $responseFileName += ".intpreview"
+    $channelUri = "https://aka.ms/vs/$vsversion/intpreview"
+} else {
+    # Release channel
+    $channelUri = "https://aka.ms/vs/$vsversion/stable"
 }
 
 $responseFile = "$PSScriptRoot\$responseFileName.json"
 $channelId = (Get-Content $responseFile | ConvertFrom-Json).channelId
 
 $bootstrapperUri = "$channelUri/vs_$($Edition.ToLowerInvariant()).exe"
-Write-Host "Downloading Visual Studio 2019 $Edition ($Channel) bootstrapper from $bootstrapperUri"
+Write-Host "Downloading Visual Studio $Version $Edition ($Channel) bootstrapper from $bootstrapperUri"
 Invoke-WebRequest -Uri $bootstrapperUri -OutFile $bootstrapper
 
 $productId = "Microsoft.VisualStudio.Product.$Edition"
@@ -81,7 +101,7 @@ if (-not $InstallPath) {
     $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     if (Test-Path $vsWhere)
     {
-        $installations = & $vsWhere -version '[16,17)' -format json -sort -prerelease -products $productId | ConvertFrom-Json
+        $installations = & $vsWhere -version "[$vsversion,$($vsversion+1))" -format json -prerelease -products $productId | ConvertFrom-Json |Sort-Object -Descending -Property installationVersion, installDate
         foreach ($installation in $installations) {
             Write-Host "Found '$($installation.installationName)' in '$($installation.installationPath)', channel = '$($installation.channelId)'"
             if ($installation.channelId -eq $channelId) {
@@ -93,10 +113,13 @@ if (-not $InstallPath) {
 }
 
 if (-not $InstallPath) {
+    $pathPrefix = "${env:ProgramFiles}";
     if ("$Channel" -eq "Preview") {
-        $InstallPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\${Edition}_Pre"
+        $InstallPath = "$pathPrefix\Microsoft Visual Studio\$Version\${Edition}_Insiders"
+    } elseif ("$Channel" -eq "IntPreview") {
+        $InstallPath = "$pathPrefix\Microsoft Visual Studio\$Version\${Edition}_IntPre"
     } else {
-        $InstallPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\$Edition"
+        $InstallPath = "$pathPrefix\Microsoft Visual Studio\$Version\$Edition"
     }
 }
 
@@ -111,18 +134,17 @@ if (Test-path $InstallPath) {
 $arguments += `
     '--productId', $productId, `
     '--installPath', "`"$InstallPath`"", `
-    '--in', "`"$responseFile`"", `
-    '--norestart'
+    '--in', "`"$responseFile`""
 
 if ($Passive) {
-    $arguments += '--passive'
+    $arguments += '--passive', '--norestart'
 }
 if ($Quiet) {
-    $arguments += '--quiet', '--wait'
+    $arguments += '--quiet', '--wait', '--norestart'
 }
 
 Write-Host
-Write-Host "Installing Visual Studio 2019 $Edition ($Channel)" -f Magenta
+Write-Host "Installing Visual Studio $Version $Edition ($Channel)" -f Magenta
 Write-Host
 Write-Host "Running '$bootstrapper $arguments'"
 
@@ -137,7 +159,7 @@ foreach ($i in 0, 1, 2) {
     if ($process.ExitCode -eq 0) {
         break
     } else {
-        # https://docs.microsoft.com/en-us/visualstudio/install/use-command-line-parameters-to-install-visual-studio#error-codes
+        # https://learn.microsoft.com/visualstudio/install/use-command-line-parameters-to-install-visual-studio#error-codes
         if ($process.ExitCode -eq 3010) {
             Write-Host -ForegroundColor Red "Error: Installation requires restart to finish the VS update."
             break

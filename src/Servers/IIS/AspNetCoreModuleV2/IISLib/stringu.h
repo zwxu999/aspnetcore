@@ -7,16 +7,12 @@
 #include <CodeAnalysis/Warnings.h>
 #include <strsafe.h>
 
-#pragma warning( push )
-#pragma warning ( disable : ALL_CODE_ANALYSIS_WARNINGS )
-
 class STRU
 {
 
 public:
 
     STRU(
-        VOID
     );
 
     STRU(
@@ -26,7 +22,6 @@ public:
 
     BOOL
     IsEmpty(
-        VOID
     ) const;
 
     BOOL
@@ -55,7 +50,7 @@ public:
     ) const
     {
         _ASSERTE( NULL != pszRhs );
-        if ( NULL == pszRhs )
+        if ( nullptr == pszRhs )
         {
             return FALSE;
         }
@@ -206,12 +201,10 @@ public:
     __ecount(this->m_cchLen)
     WCHAR*
     QueryStr(
-        VOID
     ) const;
 
     VOID
     Reset(
-        VOID
     );
 
     HRESULT
@@ -221,7 +214,6 @@ public:
 
     HRESULT
     SyncWithBuffer(
-        VOID
     );
 
     template<size_t size>
@@ -353,12 +345,7 @@ public:
         __in PCWSTR pwszFormatString,
         va_list     argsList
     );
-    
-    static
-    HRESULT  ExpandEnvironmentVariables(
-        __in PCWSTR                  pszString,
-        __out STRU *                 pstrExpandedString
-    );
+
 private:
 
     //
@@ -428,4 +415,3 @@ MakePathCanonicalizationProof(
     IN PCWSTR               pszName,
     OUT STRU *              pstrPath
 );
-#pragma warning( pop )

@@ -1,22 +1,22 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
-using System.Buffers;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Hosting;
 
-namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
+namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests;
+
+public static class TransportSelector
 {
-    public static class TransportSelector
+    public static IHostBuilder GetHostBuilder(long? maxReadBufferSize = null)
     {
-        public static IWebHostBuilder GetWebHostBuilder(Func<MemoryPool<byte>> memoryPoolFactory = null,
-                                                        long? maxReadBufferSize = null)
-        {
-            return new WebHostBuilder().UseSockets(options =>
+        return new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
             {
-                options.MemoryPoolFactory = memoryPoolFactory ?? options.MemoryPoolFactory;
-                options.MaxReadBufferSize = maxReadBufferSize;
+                webHostBuilder.UseSockets(options =>
+                {
+                    options.MaxReadBufferSize = maxReadBufferSize;
+                });
             });
-        }
     }
 }

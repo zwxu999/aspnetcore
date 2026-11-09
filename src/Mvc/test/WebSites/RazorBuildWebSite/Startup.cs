@@ -1,49 +1,42 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System.IO;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
-namespace RazorBuildWebSite
+namespace RazorBuildWebSite;
+
+public class Startup
 {
-    public class Startup
+    public void ConfigureServices(IServiceCollection services)
     {
-        public void ConfigureServices(IServiceCollection services)
-        {
-            var fileProvider = new UpdateableFileProvider();
-            services.AddSingleton(fileProvider);
+        var fileProvider = new UpdateableFileProvider();
+        services.AddSingleton(fileProvider);
 
-            services.AddMvc()
-                .AddRazorRuntimeCompilation(options => options.FileProviders.Add(fileProvider))
-                .SetCompatibilityVersion(CompatibilityVersion.Latest);
-        }
-
-        public void Configure(IApplicationBuilder app)
-        {
-            app.UseRouting();
-            app.UseEndpoints(endpoints =>
-            {
-                endpoints.MapDefaultControllerRoute();
-                endpoints.MapRazorPages();
-            });
-        }
-
-        public static void Main(string[] args)
-        {
-            var host = CreateWebHostBuilder(args)
-                .Build();
-
-            host.Run();
-        }
-
-        public static IWebHostBuilder CreateWebHostBuilder(string[] args) =>
-            new WebHostBuilder()
-            .UseContentRoot(Directory.GetCurrentDirectory())
-            .UseStartup<Startup>()
-            .UseKestrel()
-            .UseIISIntegration();
+#pragma warning disable ASPDEPR003 // Type or member is obsolete
+        services.AddMvc()
+            .AddRazorRuntimeCompilation(options => options.FileProviders.Add(fileProvider));
+#pragma warning restore ASPDEPR003 // Type or member is obsolete
     }
+
+    public void Configure(IApplicationBuilder app)
+    {
+        app.UseRouting();
+        app.UseEndpoints(endpoints =>
+        {
+            endpoints.MapDefaultControllerRoute();
+            endpoints.MapRazorPages();
+            endpoints.MapFallbackToPage("/Fallback");
+        });
+    }
+
+    public static IHostBuilder CreateHostBuilder(string[] args) =>
+        new HostBuilder()
+            .ConfigureWebHost(webHostBuilder =>
+            {
+                webHostBuilder
+                    .UseContentRoot(Directory.GetCurrentDirectory())
+                    .UseStartup<Startup>()
+                    .UseKestrel()
+                    .UseIISIntegration();
+            });
 }

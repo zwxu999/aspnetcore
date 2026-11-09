@@ -1,14 +1,26 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+/*
+ * For a detailed explanation regarding each configuration property, visit:
+ * https://jestjs.io/docs/configuration
+ */
+
+path = require('path');
+
+const ROOT_DIR = path.resolve(__dirname, '..', '..', '..');
+
+/** @type {import('jest').Config} */
 
 module.exports = {
-  globals: {
-    "ts-jest": {
-      "tsConfig": "./tests/tsconfig.json",
-      "babeConfig": true,
-      "diagnostics": true
-    }
+  testEnvironment: 'node',
+  roots: ['<rootDir>/src','<rootDir>/test','<rootDir>/../WebAssembly/Authentication.Msal/test'],
+  testMatch: ['**/*.test.ts'],
+  moduleFileExtensions: ['js', 'ts'],
+  transform: {
+    '^.+\\.(js|ts)$': 'babel-jest',
   },
-  preset: 'ts-jest',
-  testEnvironment: 'jsdom'
-};
+  moduleDirectories: ['node_modules', 'src'],
+  testEnvironment: "jsdom",
+  reporters: [
+      "default",
+      [path.resolve(ROOT_DIR, "node_modules", "jest-junit", "index.js"), { "outputDirectory": path.resolve(ROOT_DIR, "artifacts", "log"), "outputName": `${process.platform}` + ".components-webjs.junit.xml" }]
+  ],
+}

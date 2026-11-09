@@ -1,10 +1,2 @@
 package-lock.json
-tmp/
-CustomHive/
-angular/
-blazorserver/
-blazorwasm/
-mvc/
-razor/
-react/
-reactredux/
+**/

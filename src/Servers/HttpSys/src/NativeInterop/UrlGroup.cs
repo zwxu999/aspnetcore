@@ -1,134 +1,240 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using Microsoft.AspNetCore.HttpSys.Internal;
 using Microsoft.Extensions.Logging;
+using Windows.Win32;
+using Windows.Win32.Foundation;
+using Windows.Win32.Networking.HttpServer;
 
-namespace Microsoft.AspNetCore.Server.HttpSys
+namespace Microsoft.AspNetCore.Server.HttpSys;
+
+internal sealed partial class UrlGroup : IDisposable
 {
-    internal class UrlGroup : IDisposable
+    // See https://learn.microsoft.com/windows/win32/api/http/ns-http-http_channel_bind_info
+    private const uint HTTP_CHANNEL_BIND_SECURE_CHANNEL_TOKEN = 0x00000008;
+
+    private static readonly int BindingInfoSize = Marshal.SizeOf<HTTP_BINDING_INFO>();
+    private static readonly int QosInfoSize = Marshal.SizeOf<HTTP_QOS_SETTING_INFO>();
+    private static readonly int RequestPropertyInfoSize = Marshal.SizeOf<HTTP_BINDING_INFO>();
+    private static readonly int ChannelBindInfoSize = Marshal.SizeOf<HTTP_CHANNEL_BIND_INFO>();
+
+    private readonly ILogger _logger;
+
+    private readonly ServerSession? _serverSession;
+    private readonly RequestQueue _requestQueue;
+    private bool _disposed;
+    private readonly bool _created;
+
+    internal unsafe UrlGroup(ServerSession serverSession, RequestQueue requestQueue, ILogger logger)
     {
-        private static readonly int QosInfoSize =
-            Marshal.SizeOf<HttpApiTypes.HTTP_QOS_SETTING_INFO>();
+        _serverSession = serverSession;
+        _requestQueue = requestQueue;
+        _logger = logger;
 
-        private ServerSession _serverSession;
-        private ILogger _logger;
-        private bool _disposed;
+        _created = true;
+        var statusCode = PInvoke.HttpCreateUrlGroup(_serverSession.Id.DangerousGetServerSessionId(), out var urlGroupId);
 
-        internal unsafe UrlGroup(ServerSession serverSession, ILogger logger)
+        if (statusCode != ErrorCodes.ERROR_SUCCESS)
         {
-            _serverSession = serverSession;
-            _logger = logger;
+            throw new HttpSysException((int)statusCode);
+        }
 
-            ulong urlGroupId = 0;
-            var statusCode = HttpApi.HttpCreateUrlGroup(
-                _serverSession.Id.DangerousGetServerSessionId(), &urlGroupId, 0);
+        Debug.Assert(urlGroupId != 0, "Invalid id returned by HttpCreateUrlGroup");
+        Id = urlGroupId;
+    }
 
-            if (statusCode != UnsafeNclNativeMethods.ErrorCodes.ERROR_SUCCESS)
+    // Sets HttpServerChannelBindProperty with the requested hardening level and the HTTP_CHANNEL_BIND_SECURE_CHANNEL_TOKEN flag
+    // so the per-request CBT is delivered to the app.
+    internal unsafe void SetChannelBindingProperty(HttpAuthenticationHardeningLevel level)
+    {
+        var info = new HTTP_CHANNEL_BIND_INFO
+        {
+            Hardening = level switch
             {
-                throw new HttpSysException((int)statusCode);
+                HttpAuthenticationHardeningLevel.Strict => HTTP_AUTHENTICATION_HARDENING_LEVELS.HttpAuthenticationHardeningStrict,
+                HttpAuthenticationHardeningLevel.Legacy => HTTP_AUTHENTICATION_HARDENING_LEVELS.HttpAuthenticationHardeningLegacy,
+                HttpAuthenticationHardeningLevel.Medium or _ => HTTP_AUTHENTICATION_HARDENING_LEVELS.HttpAuthenticationHardeningMedium,
+            },
+            ServiceNames = (HTTP_SERVICE_BINDING_BASE**)IntPtr.Zero,
+            NumberOfServiceNames = 0,
+
+            // optimize: Flags control if CBT is included in NativeRequest, and if legacy level is used, no point to load the CBT data.
+            Flags = level == HttpAuthenticationHardeningLevel.Legacy
+                ? default
+                : HTTP_CHANNEL_BIND_SECURE_CHANNEL_TOKEN,
+        };
+
+        SetProperty(
+            HTTP_SERVER_PROPERTY.HttpServerChannelBindProperty,
+            new IntPtr(&info),
+            (uint)ChannelBindInfoSize,
+            throwOnError: level == HttpAuthenticationHardeningLevel.Strict);
+    }
+
+    internal ulong Id { get; private set; }
+
+    internal unsafe void SetMaxConnections(long maxConnections)
+    {
+        var connectionLimit = new HTTP_CONNECTION_LIMIT_INFO
+        {
+            Flags = HttpApi.HTTP_PROPERTY_FLAGS_PRESENT,
+            MaxConnections = (uint)maxConnections
+        };
+
+        var qosSettings = new HTTP_QOS_SETTING_INFO
+        {
+            QosType = HTTP_QOS_SETTING_TYPE.HttpQosSettingTypeConnectionLimit,
+            QosSetting = &connectionLimit
+        };
+
+        SetProperty(HTTP_SERVER_PROPERTY.HttpServerQosProperty, new IntPtr(&qosSettings), (uint)QosInfoSize);
+    }
+
+    internal unsafe void SetDelegationProperty(RequestQueue destination)
+    {
+        var propertyInfo = new HTTP_BINDING_INFO
+        {
+            Flags = HttpApi.HTTP_PROPERTY_FLAGS_PRESENT,
+            RequestQueueHandle = (HANDLE)destination.Handle.DangerousGetHandle()
+        };
+
+        SetProperty(HTTP_SERVER_PROPERTY.HttpServerDelegationProperty, new IntPtr(&propertyInfo), (uint)RequestPropertyInfoSize);
+    }
+
+    internal unsafe void UnSetDelegationProperty(RequestQueue destination, bool throwOnError = true)
+    {
+        var propertyInfo = new HTTP_BINDING_INFO
+        {
+            RequestQueueHandle = (HANDLE)destination.Handle.DangerousGetHandle()
+        };
+
+        SetProperty(HTTP_SERVER_PROPERTY.HttpServerDelegationProperty, new IntPtr(&propertyInfo), (uint)RequestPropertyInfoSize, throwOnError);
+    }
+
+    internal unsafe void SetProperty(HTTP_SERVER_PROPERTY property, IntPtr info, uint infosize, bool throwOnError = true)
+    {
+        Debug.Assert(info != IntPtr.Zero, "SetUrlGroupProperty called with invalid pointer");
+        CheckDisposed();
+
+        var statusCode = PInvoke.HttpSetUrlGroupProperty(Id, property, info.ToPointer(), infosize);
+
+        if (statusCode != ErrorCodes.ERROR_SUCCESS)
+        {
+            var exception = new HttpSysException((int)statusCode);
+            Log.SetUrlPropertyError(_logger, exception);
+            if (throwOnError)
+            {
+                throw exception;
             }
-
-            Debug.Assert(urlGroupId != 0, "Invalid id returned by HttpCreateUrlGroup");
-            Id = urlGroupId;
         }
+    }
 
-        internal ulong Id { get; private set; }
+    internal unsafe void AttachToQueue()
+    {
+        CheckDisposed();
+        // Set the association between request queue and url group. After this, requests for registered urls will
+        // get delivered to this request queue.
 
-        internal unsafe void SetMaxConnections(long maxConnections)
+        var info = new HTTP_BINDING_INFO
         {
-            var connectionLimit = new HttpApiTypes.HTTP_CONNECTION_LIMIT_INFO();
-            connectionLimit.Flags = HttpApiTypes.HTTP_FLAGS.HTTP_PROPERTY_FLAG_PRESENT;
-            connectionLimit.MaxConnections = (uint)maxConnections;
+            Flags = HttpApi.HTTP_PROPERTY_FLAGS_PRESENT,
+            RequestQueueHandle = (HANDLE)_requestQueue.Handle.DangerousGetHandle()
+        };
 
-            var qosSettings = new HttpApiTypes.HTTP_QOS_SETTING_INFO();
-            qosSettings.QosType = HttpApiTypes.HTTP_QOS_SETTING_TYPE.HttpQosSettingTypeConnectionLimit;
-            qosSettings.QosSetting = new IntPtr(&connectionLimit);
+        var infoptr = new IntPtr(&info);
 
-            SetProperty(HttpApiTypes.HTTP_SERVER_PROPERTY.HttpServerQosProperty, new IntPtr(&qosSettings), (uint)QosInfoSize);
-        }
+        SetProperty(HTTP_SERVER_PROPERTY.HttpServerBindingProperty,
+            infoptr, (uint)BindingInfoSize);
+    }
 
-        internal void SetProperty(HttpApiTypes.HTTP_SERVER_PROPERTY property, IntPtr info, uint infosize, bool throwOnError = true)
+    internal unsafe void DetachFromQueue()
+    {
+        CheckDisposed();
+        // Break the association between request queue and url group. After this, requests for registered urls
+        // will get 503s.
+        // Note that this method may be called multiple times (Stop() and then Abort()). This
+        // is fine since http.sys allows to set HttpServerBindingProperty multiple times for valid
+        // Url groups.
+
+        var info = new HTTP_BINDING_INFO();
+        var infoptr = new IntPtr(&info);
+
+        SetProperty(HTTP_SERVER_PROPERTY.HttpServerBindingProperty,
+            infoptr, (uint)BindingInfoSize, throwOnError: false);
+    }
+
+    internal void RegisterPrefix(string uriPrefix, int contextId)
+    {
+        Log.RegisteringPrefix(_logger, uriPrefix);
+        CheckDisposed();
+        var statusCode = PInvoke.HttpAddUrlToUrlGroup(Id, uriPrefix, (ulong)contextId);
+        if (statusCode != ErrorCodes.ERROR_SUCCESS)
         {
-            Debug.Assert(info != IntPtr.Zero, "SetUrlGroupProperty called with invalid pointer");
-            CheckDisposed();
-
-            var statusCode = HttpApi.HttpSetUrlGroupProperty(Id, property, info, infosize);
-
-            if (statusCode != UnsafeNclNativeMethods.ErrorCodes.ERROR_SUCCESS)
+            if (statusCode == ErrorCodes.ERROR_ALREADY_EXISTS)
             {
-                var exception = new HttpSysException((int)statusCode);
-                _logger.LogError(LoggerEventIds.SetUrlPropertyError, exception, "SetUrlGroupProperty");
-                if (throwOnError)
+                // If we didn't create the queue and the uriPrefix already exists, confirm it exists for the
+                // queue we attached to, if so we are all good, otherwise throw an already registered error.
+                if (!_requestQueue.Created)
                 {
-                    throw exception;
+                    unsafe
+                    {
+                        var findUrlStatusCode = PInvoke.HttpFindUrlGroupId(uriPrefix, _requestQueue.Handle, out var _);
+                        if (findUrlStatusCode == ErrorCodes.ERROR_SUCCESS)
+                        {
+                            // Already registered for the desired queue, all good
+                            return;
+                        }
+                    }
                 }
+
+                throw new HttpSysException((int)statusCode, Resources.FormatException_PrefixAlreadyRegistered(uriPrefix));
             }
+            if (statusCode == ErrorCodes.ERROR_ACCESS_DENIED)
+            {
+                throw new HttpSysException((int)statusCode, Resources.FormatException_AccessDenied(uriPrefix, Environment.UserDomainName + @"\" + Environment.UserName));
+            }
+            throw new HttpSysException((int)statusCode);
+        }
+    }
+
+    internal void UnregisterPrefix(string uriPrefix)
+    {
+        Log.UnregisteringPrefix(_logger, uriPrefix);
+        CheckDisposed();
+
+        PInvoke.HttpRemoveUrlFromUrlGroup(Id, uriPrefix, 0);
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
         }
 
-        internal void RegisterPrefix(string uriPrefix, int contextId)
+        _disposed = true;
+
+        if (_created)
         {
-            _logger.LogDebug(LoggerEventIds.RegisteringPrefix, "Listening on prefix: {0}" , uriPrefix);
-            CheckDisposed();
-            var statusCode = HttpApi.HttpAddUrlToUrlGroup(Id, uriPrefix, (ulong)contextId, 0);
-
-            if (statusCode != UnsafeNclNativeMethods.ErrorCodes.ERROR_SUCCESS)
-            {
-                if (statusCode == UnsafeNclNativeMethods.ErrorCodes.ERROR_ALREADY_EXISTS)
-                {
-                    throw new HttpSysException((int)statusCode, Resources.FormatException_PrefixAlreadyRegistered(uriPrefix));
-                }
-                if (statusCode == UnsafeNclNativeMethods.ErrorCodes.ERROR_ACCESS_DENIED)
-                {
-                    throw new HttpSysException((int)statusCode, Resources.FormatException_AccessDenied(uriPrefix, Environment.UserDomainName + @"\" + Environment.UserName));
-                }
-                throw new HttpSysException((int)statusCode);
-            }
-        }
-
-        internal bool UnregisterPrefix(string uriPrefix)
-        {
-            _logger.LogInformation(LoggerEventIds.UnregisteringPrefix, "Stop listening on prefix: {0}" , uriPrefix);
-            CheckDisposed();
-
-            var statusCode = HttpApi.HttpRemoveUrlFromUrlGroup(Id, uriPrefix, 0);
-
-            if (statusCode == UnsafeNclNativeMethods.ErrorCodes.ERROR_NOT_FOUND)
-            {
-                return false;
-            }
-            return true;
-        }
-
-        public void Dispose()
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _disposed = true;
 
             Debug.Assert(Id != 0, "HttpCloseUrlGroup called with invalid url group id");
 
-            uint statusCode = HttpApi.HttpCloseUrlGroup(Id);
+            var statusCode = PInvoke.HttpCloseUrlGroup(Id);
 
-            if (statusCode != UnsafeNclNativeMethods.ErrorCodes.ERROR_SUCCESS)
+            if (statusCode != ErrorCodes.ERROR_SUCCESS)
             {
-                _logger.LogError(LoggerEventIds.CloseUrlGroupError, "HttpCloseUrlGroup; Result: {0}" , statusCode);
+                Log.CloseUrlGroupError(_logger, statusCode);
             }
-            Id = 0;
+
         }
 
-        private void CheckDisposed()
-        {
-            if (_disposed)
-            {
-                throw new ObjectDisposedException(this.GetType().FullName);
-            }
-        }
+        Id = 0;
+    }
+
+    private void CheckDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
     }
 }

@@ -1,47 +1,30 @@
 {
-  "$schema": "http://json.schemastore.org/template",
+  "$schema": "https://json.schemastore.org/template",
   "author": "Microsoft",
   "classifications": [
     "Web",
     "Blazor",
-    "WebAssembly"
+    "WebAssembly",
+    "PWA"
   ],
-  "name": "Blazor WebAssembly App",
-  "defaultName": "WebApplication",
-  "description": "A project template for creating a Blazor app that runs on WebAssembly and is optionally hosted by an ASP.NET Core app. This template can be used for web apps with rich dynamic user interfaces (UIs).",
+  "name": "Blazor WebAssembly Standalone App",
+  "defaultName": "BlazorApp",
+  "description": "A project template for creating a Blazor app that runs on WebAssembly. This template can be used for web apps with rich dynamic user interfaces (UIs).",
   "groupIdentity": "Microsoft.Web.Blazor.Wasm",
-  "precedence": "6002",
+  "precedence": "12000",
   "guids": [
     "4C26868E-5E7C-458D-82E3-040509D0C71F",
     "5990939C-7E7B-4CFA-86FF-44CA5756498A",
     "650B3CE7-2E93-4CC4-9F46-466686815EAA",
     "0AFFA7FD-4E37-4636-AB91-3753E746DB98",
-    "09732173-2cef-46b7-83db-1334bcb079d3", // Tenant ID
     "53bc9b9d-9d6a-45d4-8429-2a2761773502" // Client ID
   ],
-  "identity": "Microsoft.Web.Blazor.Wasm.CSharp.5.0",
-  "thirdPartyNotices": "https://aka.ms/aspnetcore/5.0-third-party-notices",
+  "identity": "Microsoft.Web.Blazor.Wasm.CSharp.12.0",
+  "thirdPartyNotices": "https://aka.ms/aspnetcore/12.0-third-party-notices",
   "preferNameDirectory": true,
   "primaryOutputs": [
     {
-      "condition": "(Hosted && (HostIdentifier == \"dotnetcli\" || HostIdentifier == \"dotnetcli-preview\"))",
-      "path": "ComponentsWebAssembly-CSharp.sln"
-    },
-    {
-      "condition": "(Hosted && HostIdentifier != \"dotnetcli\" && HostIdentifier != \"dotnetcli-preview\")",
-      "path": "Server/ComponentsWebAssembly-CSharp.Server.csproj"
-    },
-    {
-      "condition": "(!Hosted)",
-      "path": "ComponentsWebAssembly-CSharp.Client.csproj"
-    },
-    {
-      "condition": "(Hosted && HostIdentifier != \"dotnetcli\" && HostIdentifier != \"dotnetcli-preview\")",
-      "path": "Client/ComponentsWebAssembly-CSharp.Client.csproj"
-    },
-    {
-      "condition": "(Hosted && HostIdentifier != \"dotnetcli\" && HostIdentifier != \"dotnetcli-preview\")",
-      "path": "Shared/ComponentsWebAssembly-CSharp.Shared.csproj"
+      "path": "ComponentsWebAssembly-CSharp.csproj"
     }
   ],
   "shortName": "blazorwasm",
@@ -53,163 +36,97 @@
       "exclude": [
         ".template.config/**"
       ],
+      "copyOnly": [
+        "**/wwwroot/bootstrap/**"
+      ],
       "modifiers": [
-        {
-          "condition": "(!Hosted)",
-          "exclude": [
-            "Server/**",
-            "Shared/**",
-            "*.sln"
-          ],
-          "rename": {
-            ".Client.csproj": ".csproj",
-            "Client": "."
-          }
-        },
-        {
-          "condition": "(Hosted)",
-          "exclude": [
-            "Client/wwwroot/sample-data/**"
-          ]
-        },
-        {
-          "condition": "(Hosted && HostIdentifier != \"dotnetcli\" && HostIdentifier != \"dotnetcli-preview\")",
-          "exclude": [
-            "*.sln"
-          ]
-        },
         {
           "condition": "(!PWA)",
           "exclude": [
-            "Client/wwwroot/service-worker*.js",
-            "Client/wwwroot/manifest.json",
-            "Client/wwwroot/icon-512.png"
+            "wwwroot/service-worker*.js",
+            "wwwroot/manifest.webmanifest",
+            "wwwroot/icon-512.png"
           ]
         },
         {
-          "condition": "(!IndividualLocalAuth || UseLocalDB)",
+          "condition": "(!UseProgramMain)",
           "exclude": [
-            "Server/app.db"
+            "Program.Main.cs"
           ]
+        },
+        {
+          "condition": "(UseProgramMain)",
+          "exclude": [
+            "Program.cs"
+          ],
+          "rename": {
+            "Program.Main.cs": "Program.cs"
+          }
         },
         {
           "condition": "(!IndividualLocalAuth)",
           "exclude": [
-            "Server/Data/SqlLite/**",
-            "Server/Data/SqlServer/**",
-            "Server/Data/ApplicationDbContext.cs",
-            "Server/Areas/**",
-            "Client/wwwroot/appsettings.Development.json"
+            "wwwroot/appsettings.Development.json"
           ]
         },
         {
-          "condition": "(IndividualLocalAuth && UseLocalDB)",
+          "condition": "(NoAuth)",
           "rename": {
-            "Server/Data/SqlServer/": "Server/Data/Migrations/"
+            "Layout/MainLayout.NoAuth.razor": "Layout/MainLayout.razor"
           },
           "exclude": [
-            "Server/Data/SqlLite/**"
+            "Pages/Authentication.razor",
+            "Layout/LoginDisplay.razor",
+            "Layout/MainLayout.Auth.razor",
+            "Layout/RedirectToLogin.razor",
+            "wwwroot/appsettings.Development.json",
+            "wwwroot/appsettings.json"
           ]
         },
         {
-          "condition": "(IndividualLocalAuth && !UseLocalDB)",
+          "condition": "(!NoAuth)",
           "rename": {
-            "Server/Data/SqlLite/": "Server/Data/Migrations/"
+            "Layout/MainLayout.Auth.razor": "Layout/MainLayout.razor"
           },
           "exclude": [
-            "Server/Data/SqlServer/**"
+            "Layout/MainLayout.NoAuth.razor"
           ]
         },
         {
-          "condition": "(Hosted && NoAuth)",
+          "condition": "(!GenerateApi)",
           "rename": {
-            "Client/Shared/MainLayout.NoAuth.razor": "Client/Shared/MainLayout.razor"
+            "Layout/NavMenu.NoApi.razor": "Layout/NavMenu.razor"
           },
           "exclude": [
-            "Client/Pages/Authentication.razor",
-            "Client/Shared/LoginDisplay.*.razor",
-            "Client/Shared/MainLayout.Auth.razor",
-            "Client/Shared/RedirectToLogin.razor",
-            "Client/wwwroot/appsettings.Development.json",
-            "Client/wwwroot/appsettings.json"
+            "Pages/CallWebApi.razor",
+            "Layout/NavMenu.CallsWebApi.razor"
           ]
         },
         {
-          "condition": "(Hosted && !NoAuth)",
+          "condition": "(GenerateApi)",
           "rename": {
-            "Client/Shared/MainLayout.Auth.razor": "Client/Shared/MainLayout.razor"
+            "Layout/NavMenu.CallsWebApi.razor": "Layout/NavMenu.razor"
           },
           "exclude": [
-            "Client/Shared/MainLayout.NoAuth.razor"
+            "Layout/NavMenu.NoApi.razor"
           ]
         },
         {
-          "condition": "(Hosted && IndividualLocalAuth)",
-          "rename": {
-            "Client/Shared/LoginDisplay.IndividualLocalAuth.razor": "Client/Shared/LoginDisplay.razor"
-          },
+          "condition": "(ExcludeLaunchSettings)",
           "exclude": [
-            "Client/Shared/LoginDisplay.IndividualMsalAuth.razor",
-            "Client/wwwroot/appsettings.json",
-            "Client/wwwroot/appsettings.Development.json"
+            "Properties/launchSettings.json"
           ]
         },
         {
-          "condition": "(Hosted && (IndividualB2CAuth || OrganizationalAuth))",
-          "rename": {
-            "Client/Shared/LoginDisplay.IndividualMsalAuth.razor": "Client/Shared/LoginDisplay.razor"
-          },
+          "condition": "(!SampleContent)",
           "exclude": [
-            "Client/Shared/LoginDisplay.IndividualLocalAuth.razor"
-          ]
-        },
-        {
-          "condition": "(!Hosted && NoAuth)",
-          "rename": {
-            "Client/Shared/MainLayout.NoAuth.razor": "Shared/MainLayout.razor"
-          },
-          "exclude": [
-            "Client/Pages/Authentication.razor",
-            "Client/Shared/LoginDisplay.*.razor",
-            "Client/Shared/MainLayout.Auth.razor",
-            "Client/Shared/RedirectToLogin.razor",
-            "Client/wwwroot/appsettings.Development.json",
-            "Client/wwwroot/appsettings.json"
-          ]
-        },
-        {
-          "condition": "(!Hosted && !NoAuth)",
-          "rename": {
-            "Client/Shared/MainLayout.Auth.razor": "Shared/MainLayout.razor"
-          },
-          "exclude": [
-            "Client/Shared/MainLayout.NoAuth.razor"
-          ]
-        },
-        {
-          "condition": "(!Hosted && IndividualLocalAuth)",
-          "rename": {
-            "Client/Shared/LoginDisplay.IndividualLocalAuth.razor": "Shared/LoginDisplay.razor"
-          },
-          "exclude": [
-            "Client/Shared/LoginDisplay.IndividualMsalAuth.razor"
-          ]
-        },
-        {
-          "condition": "(!Hosted && (IndividualB2CAuth || OrganizationalAuth))",
-          "rename": {
-            "Client/Shared/LoginDisplay.IndividualMsalAuth.razor": "Shared/LoginDisplay.razor"
-          },
-          "exclude": [
-            "Client/Shared/LoginDisplay.IndividualLocalAuth.razor"
-          ]
-        },
-        {
-          "condition": "(!IndividualLocalAuth || !Hosted)",
-          "exclude": [
-            "Server/Areas/Identity/Pages/Shared/_LoginPartial.cshtml",
-            "Server/Controllers/OidcConfigurationController.cs",
-            "Server/Models/ApplicationUser.cs"
+            "Pages/Counter.*",
+            "Pages/Weather.*",
+            "Layout/MainLayout.razor.css",
+            "Layout/NavMenu.*",
+            "wwwroot/lib/**",
+            "wwwroot/favicon.png",
+            "wwwroot/sample-data/weather.json"
           ]
         }
       ]
@@ -222,12 +139,11 @@
       "datatype": "choice",
       "choices": [
         {
-          "choice": "net5.0",
-          "description": "Target net5.0"
+          "choice": "net12.0"
         }
       ],
-      "replaces": "net5.0",
-      "defaultValue": "net5.0"
+      "replaces": "net12.0",
+      "defaultValue": "net12.0"
     },
     "HostIdentifier": {
       "type": "bind",
@@ -238,12 +154,6 @@
       "datatype": "bool",
       "description": "If specified, skips the automatic restore of the project on create.",
       "defaultValue": "false"
-    },
-    "Hosted": {
-      "type": "parameter",
-      "datatype": "bool",
-      "defaultValue": "false",
-      "description": "If specified, includes an ASP.NET Core host for the Blazor WebAssembly app."
     },
     "auth": {
       "type": "parameter",
@@ -277,18 +187,19 @@
     },
     "MissingAuthority": {
       "type": "computed",
-      "value": "(IndividualAuth && !Hosted && Authority == \"https://login.microsoftonline.com/\" && ClientId == \"33333333-3333-3333-33333333333333333\")"
+      "value": "(IndividualAuth && Authority == \"https://login.microsoftonline.com/\" && ClientId == \"33333333-3333-3333-33333333333333333\")"
     },
     "AAdB2CInstance": {
       "type": "parameter",
       "datatype": "string",
+      "defaultValue": "https://aadB2CInstance.b2clogin.com/",
       "replaces": "https:////aadB2CInstance.b2clogin.com/",
       "description": "The Azure Active Directory B2C instance to connect to (use with IndividualB2C auth)."
     },
     "SignUpSignInPolicyId": {
       "type": "parameter",
       "datatype": "string",
-      "defaultValue": "",
+      "defaultValue": "b2c_1_susi",
       "replaces": "MySignUpSignInPolicyId",
       "description": "The sign-in and sign-up policy ID for this project (use with IndividualB2C auth)."
     },
@@ -297,7 +208,7 @@
       "datatype": "string",
       "defaultValue": "https://login.microsoftonline.com/",
       "replaces": "https:////login.microsoftonline.com/",
-      "description": "The Azure Active Directory instance to connect to (use with SingleOrg)."
+      "description": "The Azure Active Directory instance to connect to (use with SingleOrg auth)."
     },
     "ClientId": {
       "type": "parameter",
@@ -327,7 +238,7 @@
       "type": "parameter",
       "datatype": "string",
       "replaces": "api-scope",
-      "defaultValue": "user_impersonation",
+      "defaultValue": "access_as_user",
       "description": "The API scope the client needs to request to provision an access token. (use with IndividualB2C, SingleOrg)."
     },
     "TenantId": {
@@ -355,30 +266,80 @@
       "defaultValue": "false",
       "description": "Whether to exclude launchSettings.json from the generated template."
     },
-    "HttpPort": {
+    "kestrelHttpPort": {
       "type": "parameter",
       "datatype": "integer",
       "description": "Port number to use for the HTTP endpoint in launchSettings.json."
     },
-    "HttpPortGenerated": {
+    "kestrelHttpPortGenerated": {
       "type": "generated",
-      "generator": "port"
+      "generator": "port",
+      "parameters": {
+        "low": 5000,
+        "high": 5300
+      }
     },
-    "HttpPortReplacer": {
+    "kestrelHttpPortReplacer": {
       "type": "generated",
       "generator": "coalesce",
       "parameters": {
-        "sourceVariableName": "HttpPort",
-        "fallbackVariableName": "HttpPortGenerated"
+        "sourceVariableName": "kestrelHttpPort",
+        "fallbackVariableName": "kestrelHttpPortGenerated"
       },
-      "replaces": "8080"
+      "replaces": "5000",
+      "onlyIf": [{
+        "after": "localhost:"
+      }]
     },
-    "HttpsPort": {
+    "kestrelHttpsPort": {
       "type": "parameter",
       "datatype": "integer",
       "description": "Port number to use for the HTTPS endpoint in launchSettings.json. This option is only applicable when the parameter no-https is not used (no-https will be ignored if either IndividualAuth or OrganizationalAuth is used)."
     },
-    "HttpsPortGenerated": {
+    "kestrelHttpsPortGenerated": {
+      "type": "generated",
+      "generator": "port",
+      "parameters": {
+        "low": 7000,
+        "high": 7300
+      }
+    },
+    "kestrelHttpsPortReplacer": {
+      "type": "generated",
+      "generator": "coalesce",
+      "parameters": {
+        "sourceVariableName": "kestrelHttpsPort",
+        "fallbackVariableName": "kestrelHttpsPortGenerated"
+      },
+      "replaces": "5001",
+      "onlyIf": [{
+        "after": "localhost:"
+      }]
+    },
+    "iisHttpPort": {
+      "type": "parameter",
+      "datatype": "integer",
+      "description": "Port number to use for the IIS Express HTTP endpoint in launchSettings.json."
+    },
+    "iisHttpPortGenerated": {
+      "type": "generated",
+      "generator": "port"
+    },
+    "iisHttpPortReplacer": {
+      "type": "generated",
+      "generator": "coalesce",
+      "parameters": {
+        "sourceVariableName": "iisHttpPort",
+        "fallbackVariableName": "iisHttpPortGenerated"
+      },
+      "replaces": "8080"
+    },
+    "iisHttpsPort": {
+      "type": "parameter",
+      "datatype": "integer",
+      "description": "Port number to use for the IIS Express HTTPS endpoint in launchSettings.json. This option is only applicable when the parameter no-https is not used (no-https will be ignored if either IndividualAuth or OrganizationalAuth is used)."
+    },
+    "iisHttpsPortGenerated": {
       "type": "generated",
       "generator": "port",
       "parameters": {
@@ -386,12 +347,12 @@
         "high": 44399
       }
     },
-    "HttpsPortReplacer": {
+    "iisHttpsPortReplacer": {
       "type": "generated",
       "generator": "coalesce",
       "parameters": {
-        "sourceVariableName": "HttpsPort",
-        "fallbackVariableName": "HttpsPortGenerated"
+        "sourceVariableName": "iisHttpsPort",
+        "fallbackVariableName": "iisHttpsPortGenerated"
       },
       "replaces": "44300"
     },
@@ -399,6 +360,7 @@
       "type": "parameter",
       "datatype": "bool",
       "defaultValue": "false",
+      "displayName": "_Progressive Web Application",
       "description": "If specified, produces a Progressive Web Application (PWA) supporting installation and offline use."
     },
     "OrganizationalAuth": {
@@ -425,13 +387,38 @@
       "type": "computed",
       "value": "(auth == \"IndividualB2C\")"
     },
+    "IncludeSampleContent": {
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "true",
+      "displayName": "_Include sample pages",
+      "description": "Configures whether to add sample pages and styling to demonstrate basic usage patterns."
+    },
+    "Empty": {
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "false",
+      "description": "Configures whether to omit sample pages and styling that demonstrate basic usage patterns."
+    },
+    "SampleContent": {
+      "type": "computed",
+      "value": "(((IncludeSampleContent && (HostIdentifier != \"dotnetcli\" && HostIdentifier != \"dotnetcli-preview\"))) || ((!Empty && (HostIdentifier == \"dotnetcli\" || HostIdentifier == \"dotnetcli-preview\"))))"
+    },
     "NoAuth": {
       "type": "computed",
       "value": "(!(IndividualAuth || OrganizationalAuth))"
     },
     "RequiresHttps": {
       "type": "computed",
-      "value": "(OrganizationalAuth || IndividualAuth || !NoHttps)"
+      "value": "(OrganizationalAuth || IndividualAuth)"
+    },
+    "HasHttpProfile": {
+      "type": "computed",
+      "value": "(!RequiresHttps)"
+    },
+    "HasHttpsProfile": {
+      "type": "computed",
+      "value": "(RequiresHttps || !NoHttps)"
     },
     "NoHttps": {
       "type": "parameter",
@@ -452,6 +439,30 @@
       "parameters": {
         "format": "yyyy"
       }
+    },
+    "CalledApiUrl": {
+      "type": "parameter",
+      "datatype": "string",
+      "replaces": "[WebApiUrl]",
+      "defaultValue": "https://graph.microsoft.com/v1.0",
+      "description": "URL of the API to call from the web app. This option only applies if --auth SingleOrg, --auth MultiOrg or --auth IndividualB2C without and ASP.NET Core host is specified."
+    },
+    "CalledApiScopes": {
+      "type": "parameter",
+      "datatype": "string",
+      "replaces": "user.read",
+      "description": "Scopes to request to call the API from the web app. This option only applies if --auth SingleOrg, --auth MultiOrg or --auth IndividualB2C without and ASP.NET Core host is specified."
+    },
+    "GenerateApi": {
+      "type": "computed",
+      "value": "(IndividualB2CAuth && (CalledApiUrl != \"https://graph.microsoft.com/v1.0\" || CalledApiScopes != \"user.read\"))"
+    },
+    "UseProgramMain": {
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "false",
+      "displayName": "Do not use _top-level statements",
+      "description": "Whether to generate an explicit Program class and Main method instead of top-level statements."
     }
   },
   "tags": {
@@ -460,18 +471,8 @@
   },
   "postActions": [
     {
-      "condition": "(!skipRestore && Hosted)",
-      "description": "Restore NuGet packages required by this project.",
-      "manualInstructions": [
-        {
-          "text": "Run 'dotnet restore'"
-        }
-      ],
-      "actionId": "210D431B-A78B-4D2F-B762-4ED3E3EA9025",
-      "continueOnError": true
-    },
-    {
-      "condition": "(!skipRestore && !Hosted)",
+      "id": "restore",
+      "condition": "(!skipRestore)",
       "description": "Restore NuGet packages required by this project.",
       "manualInstructions": [
         {
@@ -479,9 +480,20 @@
         }
       ],
       "args": {
-        "files": ["ComponentsWebAssembly-CSharp.Client.csproj"]
+        "files": ["ComponentsWebAssembly-CSharp.csproj"]
       },
       "actionId": "210D431B-A78B-4D2F-B762-4ED3E3EA9025",
+      "continueOnError": true
+    },
+    {
+      "id": "open-file",
+      "condition": "(IndividualLocalAuth && HostIdentifier != \"dotnetcli\" && HostIdentifier != \"dotnetcli-preview\")",
+      "description": "Opens Readme.txt in the editor",
+      "manualInstructions": [],
+      "actionId": "84C0DA21-51C8-4541-9940-6CA19AF04EE6",
+      "args": {
+        "files": "0"
+      },
       "continueOnError": true
     }
   ]

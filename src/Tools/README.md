@@ -4,7 +4,6 @@
 
 The folder contains command-line tools for ASP.NET Core. The following tools are bundled* in the .NET Core CLI. Follow the links below for more details on each tool.
 
-- [dotnet-watch](dotnet-watch/README.md)
 - [dotnet-user-secrets](dotnet-user-secrets/README.md)
 - [dotnet-sql-cache](dotnet-sql-cache/README.md)
 - [dotnet-dev-certs](dotnet-dev-certs/README.md)
@@ -15,7 +14,7 @@ The folder contains command-line tools for ASP.NET Core. The following tools are
 
 ## Non-bundled tools
 
-The following tools are produced by us but not bundled in the .NET Core CLI. They must be aquired independently.
+The following tools are produced by us but not bundled in the .NET Core CLI. They must be acquired independently.
 
 - [Microsoft.dotnet-openapi](Microsoft.dotnet-openapi/README.md)
 
@@ -26,20 +25,25 @@ This folder also contains the infrastructure for our partners' service reference
 - [dotnet-getdocument](dotnet-getdocument/README.md) the outside man of OpenAPI document generation tool.
 - [GetDocument.Insider](GetDocumentInsider/README.md) the inside man of OpenAPI document generation tool.
 
+## Internal tools
+
+The following tools support the internal development of ASP.NET Core. They aren't designed to be used outside of this repository.
+
+- [LinkabilityChecker](LinkabilityChecker/README.md) for testing and validating trimming of ASP.NET Core assemblies.
+
 ## Usage
 
 The command line tools can be invoked as a subcommand of `dotnet`.
 
 ```sh
-dotnet watch
-dotnet user-secrets
-dotnet sql-cache
 dotnet dev-certs
 dotnet openapi
+dotnet sql-cache
+dotnet user-secrets
 ```
 
 Add `--help` to see more details. For example,
 
 ```sh
-dotnet watch --help
+dotnet dev-certs --help
 ```
